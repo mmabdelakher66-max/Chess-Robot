@@ -36,7 +36,6 @@ import threading
 import argparse
 
 import rospy
-import rospy.myargv
 from std_msgs.msg import String
 from sensor_msgs.msg import CompressedImage
 

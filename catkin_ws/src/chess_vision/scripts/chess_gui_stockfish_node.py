@@ -31,7 +31,6 @@ import argparse
 import subprocess
 
 import rospy
-import rospy.myargv
 from std_msgs.msg import String
 
 # ── Tkinter (Python 2.7) ────────────────────────────────────
