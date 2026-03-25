@@ -46,15 +46,69 @@ SQDICT_PATH   = os.path.expanduser("~/.chess_vision/sqdict.json")
 SVM_PATH      = os.path.expanduser("~/.chess_vision/piece_svm.yml")
 CLASSES_PATH  = os.path.expanduser("~/.chess_vision/piece_classes.json")
 
-MOTION_THRESH       = 3         # absdiff mean threshold to declare motion
-STABLE_FRAMES_NEED  = 5         # consecutive stable frames before voting
-VOTE_FRAMES         = 3         # frames to vote on after stability
-OCC_THRESHOLD       = 10.0      # mean pixel delta to mark square as "changed"
-MIN_CHANGED_SQ      = 1         # minimum squares changed to accept a move
-LIGHTING_DRIFT_MAX  = 6.0       # board-wide mean delta cap (global lighting)
-BASELINE_IDLE_LOCK  = 300       # frames of pure idle before auto baseline refresh (~20s at 15fps)
-GRACE_WINDOW_SEC    = 14.0      # seconds after a legal move to accept cleanup
-CAPTURE_CLEANUP_MAX = 2         # max squares that can change during grace
+# ══════════════════════════════════════════════════════════════
+# TUNABLE PARAMETERS — edit these to tune detection behaviour
+# ══════════════════════════════════════════════════════════════
+#
+# MOTION_THRESH (default 6)
+#   Frame-to-frame absdiff mean that triggers "motion detected".
+#   Your camera noise at idle = ~2.1.  Hand moving a piece ≈ 8-20.
+#   Too low  → phantom motion from vibration/shadows.
+#   Too high → misses slow piece placements.
+#   Recommended range: 4 – 8
+#
+MOTION_THRESH       = 6
+#
+# STABLE_FRAMES_NEED (default 5)
+#   How many consecutive frames below MOTION_THRESH before we vote.
+#   Higher = waits longer after piece is placed before measuring.
+#   Recommended: 4 – 8
+#
+STABLE_FRAMES_NEED  = 5
+#
+# VOTE_FRAMES (default 3)
+#   Number of frames averaged together during the vote.
+#   More frames = more robust but slightly slower response.
+#
+VOTE_FRAMES         = 3
+#
+# OCC_THRESHOLD (default 15)
+#   Per-square mean-delta (vs baseline) to call a square "changed".
+#   From your data: real piece moves give 14–70; noise gives 1–7.
+#   Too low  → false squares flagged (shadows, reflections).
+#   Too high → destination square not detected (your h4 was 14.3).
+#   Recommended range: 12 – 20.  Start at 12 if moves are missed.
+#
+OCC_THRESHOLD       = 15.0
+#
+# LIGHTING_DRIFT_MAX (default 6)
+#   If the board-wide mean delta exceeds this, subtract it as
+#   global lighting drift. Prevents all 64 squares triggering on
+#   a light flicker.  Should be > camera noise but < real move.
+#
+LIGHTING_DRIFT_MAX  = 6.0
+#
+# BASELINE_IDLE_LOCK (default 300)
+#   Frames of pure idle before auto-refreshing the baseline.
+#   At 15 fps this is 20 seconds.  Prevents slow drift but also
+#   prevents re-baselining during a paused game.
+#   Set higher (600+) if you keep getting phantom moves.
+#
+BASELINE_IDLE_LOCK  = 300
+#
+# GRACE_WINDOW_SEC (default 4)
+#   Seconds after a legal move is accepted where a single-square
+#   change is treated as "captured piece cleanup" not a new move.
+#   Reduced from 12 → 4 so the next move can be detected quickly.
+#   If you remove captured pieces slowly, raise this to 6-8.
+#
+GRACE_WINDOW_SEC    = 4.0
+#
+# CAPTURE_CLEANUP_MAX (default 2)
+#   Max squares that may change during grace window (cleanup).
+#
+CAPTURE_CLEANUP_MAX = 2
+# ══════════════════════════════════════════════════════════════
 
 HOG_WIN  = (32, 32)
 HOG_CELL = (8, 8)
@@ -467,8 +521,24 @@ class MoveDetector(object):
         with self._lock:
             self._process(frame)
 
+    def reset_after_rejection(self):
+        """
+        Called when GUI rejected our published move as illegal.
+        The physical board has already changed, but we published
+        wrong square names.  Re-capture baseline from the CURRENT
+        frame so we stop seeing that change as 'new'.
+        """
+        with self._lock:
+            if self.last_frame is not None:
+                self.baseline.update(self.last_frame)
+            self.state        = STATE_IDLE
+            self.stable_count = 0
+            self.idle_count   = 0
+            self.vote_frames  = []
+        rospy.logwarn("Baseline reset after rejected move — board re-learned")
+
     def force_baseline(self, frame):
-        """Manually set baseline (called after calibration)."""
+        """Manually set baseline (called after calibration or 'B' key)."""
         with self._lock:
             self.baseline.update(frame)
             self._baseline_ready = True
@@ -618,26 +688,33 @@ class MoveDetector(object):
         sq1, d1 = above[0]
         sq2, d2 = above[1]
 
-        # Determine src vs dst:
-        # The source square had a piece in baseline and is now empty.
-        # The destination was empty and now has a piece.
-        # Heuristic: compare current patch mean to baseline mean.
-        # Bigger absolute change = more likely to be src (piece lifted).
+        # Determine src vs dst using signed brightness change:
+        #   Source square: piece was removed → square now looks more like bare board
+        #   Destination  : piece was added   → square brightness changed toward piece color
+        #
+        # Heuristic: the src is the square whose current mean is CLOSER to neighboring
+        # empty squares.  Simpler proxy: the square that got BRIGHTER is more likely to
+        # be the source of a dark piece, or the square that got DARKER is source of a
+        # light piece.  Because we don't know piece color, we use the square where
+        # |signed change| is larger — that's the square that changed MORE = source.
         last = self.vote_frames[-1]
         cur1 = patch_mean(last, self.sqdict[sq1])
         cur2 = patch_mean(last, self.sqdict[sq2])
         b1   = self.baseline.means.get(sq1, cur1)
         b2   = self.baseline.means.get(sq2, cur2)
 
-        # Raw signed change: positive = brighter now, negative = darker now
         chg1 = abs(cur1 - b1)
         chg2 = abs(cur2 - b2)
 
-        # Bigger absolute change = the square that changed the most = source
+        # If one square changed drastically more, it is the source (piece lifted off).
+        # If they're similar, fall back to rank order (sq1 had highest delta overall).
         if chg1 >= chg2:
             src, dst = sq1, sq2
         else:
             src, dst = sq2, sq1
+
+        rospy.loginfo("  sq1=%s cur=%.1f base=%.1f |chg|=%.1f", sq1, cur1, b1, chg1)
+        rospy.loginfo("  sq2=%s cur=%.1f base=%.1f |chg|=%.1f", sq2, cur2, b2, chg2)
 
         rospy.loginfo("Best move candidate: %s -> %s  (delta %.1f -> %.1f)",
                       src, dst, d1, d2)
@@ -760,15 +837,27 @@ class DisplayThread(threading.Thread):
                             (self._mouse_x + 10, self._mouse_y - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            status = "State:%-12s  Hover: %-4s  (move mouse to verify squares)" % (
+            status = "State:%-12s Hover:%-4s  [B]=reset baseline  [Q]=quit" % (
                 state, hovered)
             cv2.putText(disp, status, (6, h - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 0), 1)
 
             cv2.imshow(WIN, disp)
-            if cv2.waitKey(30) & 0xFF == ord('q'):
+            key = cv2.waitKey(30) & 0xFF
+            if key == ord('q'):
                 rospy.signal_shutdown("User quit display")
                 break
+            elif key in (ord('b'), ord('B')):
+                # Force re-baseline from current frame
+                with self.detector._lock:
+                    if self.detector.last_frame is not None:
+                        self.detector.baseline.update(self.detector.last_frame)
+                        self.detector.state        = STATE_IDLE
+                        self.detector.stable_count = 0
+                        self.detector.idle_count   = 0
+                        self.detector.vote_frames  = []
+                        self.detector._baseline_ready = True
+                rospy.logwarn("=== BASELINE RESET by user (B key) ===")
 
         cv2.destroyAllWindows()
 
@@ -850,6 +939,27 @@ def main():
     # ── Build detector ───────────────────────────────────────
     labeler  = PieceLabeler()
     detector = MoveDetector(sqdict, labeler, move_pub, state_pub, cleanup_pub)
+
+    # ── GUI feedback subscriptions ───────────────────────────
+    def _on_move_rejected(msg):
+        """GUI tells us the move was illegal — reset baseline from current frame."""
+        rospy.logwarn("Move rejected by GUI: %s — resetting baseline", msg.data)
+        detector.reset_after_rejection()
+
+    def _on_game_reset(msg):
+        """New Game pressed — reset state machine and re-baseline."""
+        rospy.loginfo("Game reset received — re-baselining")
+        with detector._lock:
+            if detector.last_frame is not None:
+                detector.baseline.update(detector.last_frame)
+            detector.state        = STATE_IDLE
+            detector.stable_count = 0
+            detector.idle_count   = 0
+            detector.vote_frames  = []
+            detector._baseline_ready = True
+
+    rospy.Subscriber('/chess_vision/move_rejected', String, _on_move_rejected, queue_size=5)
+    rospy.Subscriber('/chess_vision/game_reset',    String, _on_game_reset,    queue_size=5)
 
     if show:
         disp_thread = DisplayThread(detector)

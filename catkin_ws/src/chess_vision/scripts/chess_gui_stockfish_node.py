@@ -19,6 +19,8 @@ Subscribes
 Publishes
 ---------
 /chess_vision/engine_move   (String UCI)
+/chess_vision/move_rejected (String)       -- "rejected:<uci>" when move is illegal
+/chess_vision/game_reset    (String)       -- "reset" when New Game pressed
 """
 
 from __future__ import print_function
@@ -238,6 +240,8 @@ class ChessGUI(object):
                     else:
                         self._set_status("Illegal move: " + uci_str)
                         rospy.logwarn("Illegal move: %s  FEN: %s", uci_str, self.board.fen())
+                        if move_rejected_pub:
+                            move_rejected_pub.publish("rejected:" + uci_str)
                         return
 
         self.board.push(move)
@@ -345,6 +349,9 @@ class ChessGUI(object):
         self._update_history()
         self.draw_board()
         self._set_status("New game — Human=WHITE  Engine=BLACK\nMake your first move.")
+        # Tell vision node to reset baseline for fresh game
+        if game_reset_pub:
+            game_reset_pub.publish("reset")
 
     def _undo(self):
         if len(self.board.move_stack) >= 2:
@@ -435,9 +442,11 @@ class ChessGUI(object):
 
 
 # ──────────────────────────────────────────────────────────────
-# Module-level publisher (set after rospy.init_node)
+# Module-level publishers (set after rospy.init_node)
 # ──────────────────────────────────────────────────────────────
-engine_move_pub = None
+engine_move_pub   = None
+move_rejected_pub = None
+game_reset_pub    = None
 
 # ──────────────────────────────────────────────────────────────
 # Main
@@ -467,7 +476,9 @@ def main():
 
     stockfish_path = stockfish_path or find_stockfish()
 
-    engine_move_pub = rospy.Publisher('/chess_vision/engine_move', String, queue_size=5)
+    engine_move_pub   = rospy.Publisher('/chess_vision/engine_move',   String, queue_size=5)
+    move_rejected_pub = rospy.Publisher('/chess_vision/move_rejected', String, queue_size=5)
+    game_reset_pub    = rospy.Publisher('/chess_vision/game_reset',    String, queue_size=5)
     if not stockfish_path:
         rospy.logwarn("Stockfish not found — GUI will run without engine")
 
