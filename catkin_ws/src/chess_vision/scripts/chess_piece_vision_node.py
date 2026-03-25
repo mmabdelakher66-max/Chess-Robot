@@ -136,11 +136,15 @@ def find_moves(warped_before, warped_after):
 # Calibration
 # ──────────────────────────────────────────────────────────────
 
+DISPLAY_WIN = "Chess Vision"
+
+
 def calibrate_homography(cap, rotate_deg, mirror, hom_path):
     """
     Interactive 4-corner calibration.
-    Click order: a8 (top-left) → h8 (top-right) → h1 (bottom-right) → a1 (bottom-left)
+    Click order: a8 (top-left) -> h8 (top-right) -> h1 (bottom-right) -> a1 (bottom-left)
     Press S to save, R to retry, Q to quit.
+    Uses the same DISPLAY_WIN window as the main loop (no destroy/recreate).
     """
     CORNER_NAMES = ['a8', 'h8', 'h1', 'a1']
     # Destination corners in 400x400 warped image
@@ -183,9 +187,9 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
         rospy.logerr("Camera returns black frames — check cable/index")
         return None
 
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN, 800, 600)
-    cv2.setMouseCallback(WIN, on_mouse)
+    cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(DISPLAY_WIN, 900, 500)
+    cv2.setMouseCallback(DISPLAY_WIN, on_mouse)
 
     H = None
     while True:
@@ -268,7 +272,7 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
         cv2.putText(disp, status, (10, h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 0), 2)
 
-        cv2.imshow(WIN, disp)
+        cv2.imshow(DISPLAY_WIN, disp)
         key = cv2.waitKey(30) & 0xFF
 
         if key in (ord('r'), ord('R')):
@@ -280,15 +284,16 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
                 src = np.array(clicks, dtype=np.float32)
                 H = cv2.getPerspectiveTransform(src, DST_PTS)
                 save_homography(hom_path, H)
-                cv2.destroyWindow(WIN)
+                # Do NOT destroy window — run() reuses the same DISPLAY_WIN
+                cv2.setMouseCallback(DISPLAY_WIN, lambda *a: None)
                 return H
             else:
                 rospy.logwarn("Need 4 clicks first")
         elif key in (ord('q'), ord('Q')):
-            cv2.destroyWindow(WIN)
+            cv2.setMouseCallback(DISPLAY_WIN, lambda *a: None)
             return None
 
-    cv2.destroyWindow(WIN)
+    cv2.setMouseCallback(DISPLAY_WIN, lambda *a: None)
     return None
 
 
@@ -724,15 +729,17 @@ class ChessVisionNode(object):
     # ── main loop (must stay on main thread for cv2.imshow) ──
 
     def run(self):
-        cv2.namedWindow("Chess Vision", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Chess Vision", 900, 450)
+        # Window already created by calibrate_homography (or create now if
+        # calibration was skipped because homography.json already existed)
+        cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(DISPLAY_WIN, 900, 500)
 
         while not rospy.is_shutdown():
-            # Get frame
+            frame = None
             if not self._use_ros_camera:
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    frame = apply_transform(frame, self.rotate, self.mirror)
+                ret, raw = self.cap.read()
+                if ret and raw is not None:
+                    frame = apply_transform(raw, self.rotate, self.mirror)
                     self.detector.feed(frame)
                     with self._frame_lock:
                         self._latest_frame = frame
@@ -740,10 +747,12 @@ class ChessVisionNode(object):
                 with self._frame_lock:
                     frame = self._latest_frame
 
-            # Display
             if frame is not None:
-                disp = make_display(frame, self.detector)
-                cv2.imshow("Chess Vision", disp)
+                try:
+                    disp = make_display(frame, self.detector)
+                    cv2.imshow(DISPLAY_WIN, disp)
+                except Exception as e:
+                    rospy.logwarn_throttle(5, "Display error: %s", e)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('b'), ord('B')):
