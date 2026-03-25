@@ -675,12 +675,14 @@ class MoveDetector(object):
         changed = [sq for sq, d in dm.items() if d > OCC_THRESHOLD]
 
         if 0 < len(changed) <= CAPTURE_CLEANUP_MAX:
-            # Publish cleanup event but do NOT update baseline here.
-            # The user's hand may still be in frame.  Grace expires
-            # naturally and will baseline the clean board.
+            # Publish cleanup event.  Do NOT update baseline here —
+            # the user's hand may still be in frame.  Go to IDLE;
+            # the next move's pre_move_frame will be the clean board.
             for sq in changed:
                 rospy.loginfo("Cleanup event: %s", sq)
                 self.cleanup_pub.publish("cleanup:" + sq)
+            self.state = STATE_IDLE
+            self.idle_count = 0
 
     def _analyse_vote(self):
         """
@@ -700,10 +702,10 @@ class MoveDetector(object):
             ref_means = {}
             for name, pts in self.sqdict.items():
                 ref_means[name] = patch_mean(self.pre_move_frame, pts)
-            rospy.logdebug("Using pre-move snapshot as vote reference")
+            rospy.loginfo("Vote ref: pre-move snapshot (fresh — shadows cancelled)")
         else:
             ref_means = self.baseline.means
-            rospy.logdebug("No pre-move snapshot — using baseline")
+            rospy.logwarn("Vote ref: baseline (no snapshot — shadows may pollute)")
 
         # Accumulate per-square delta across all vote frames
         delta_acc = {}
