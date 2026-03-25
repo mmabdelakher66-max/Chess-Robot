@@ -587,11 +587,12 @@ class MoveDetector(object):
 
 
 def make_display(frame, detector):
-    """Build the display image: raw camera (resized) | warped board | diff."""
-    with detector._lock:
-        H        = detector.H
-        before_w = detector.before_w
-        state    = detector.state
+    """Build the display image: raw camera (resized) | warped board | diff.
+    Reads detector fields directly - no lock needed (Python GIL makes
+    attribute reads atomic, and a stale read just shows last frame)."""
+    H        = detector.H
+    before_w = detector.before_w
+    state    = detector.state
 
     TARGET_H = 400
 
@@ -640,11 +641,13 @@ class ChessVisionNode(object):
         self.cleanup_pub = rospy.Publisher('/chess_vision/cleanup_event',
                                            String, queue_size=5)
 
-        # Open camera
+        # Open camera — buffer size 1 so cap.read() always returns the
+        # latest frame immediately without blocking on a stale buffer.
         self.cap = cv2.VideoCapture(self.cam_index)
         if not self.cap.isOpened():
             rospy.logfatal("Cannot open camera %d", self.cam_index)
             sys.exit(1)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         # Load or calibrate homography
         H = None
@@ -731,7 +734,9 @@ class ChessVisionNode(object):
     # ── capture thread (background) ──────────────────────────
 
     def _capture_loop(self):
-        """Runs in background thread: reads camera, feeds detector."""
+        """Runs in background thread: reads camera, feeds detector.
+        Rate-limited to 30 fps so it does not starve the display thread."""
+        rate = rospy.Rate(30)
         while not rospy.is_shutdown():
             try:
                 ret, raw = self.cap.read()
@@ -742,6 +747,7 @@ class ChessVisionNode(object):
                         self._latest_frame = frame
             except Exception as e:
                 rospy.logwarn_throttle(5, "Capture error: %s", e)
+            rate.sleep()
 
     # ── main loop - display only, stays on main thread ───────
 
