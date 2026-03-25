@@ -726,26 +726,37 @@ class ChessVisionNode(object):
         except Exception as e:
             rospy.logwarn_throttle(5, "ROS image decode error: %s", e)
 
-    # ── main loop (must stay on main thread for cv2.imshow) ──
+    # ── capture thread (background) ──────────────────────────
 
-    def run(self):
-        # Window already created by calibrate_homography (or create now if
-        # calibration was skipped because homography.json already existed)
-        cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(DISPLAY_WIN, 900, 500)
-
+    def _capture_loop(self):
+        """Runs in background thread: reads camera, feeds detector."""
         while not rospy.is_shutdown():
-            frame = None
-            if not self._use_ros_camera:
+            try:
                 ret, raw = self.cap.read()
                 if ret and raw is not None:
                     frame = apply_transform(raw, self.rotate, self.mirror)
                     self.detector.feed(frame)
                     with self._frame_lock:
                         self._latest_frame = frame
-            else:
-                with self._frame_lock:
-                    frame = self._latest_frame
+            except Exception as e:
+                rospy.logwarn_throttle(5, "Capture error: %s", e)
+
+    # ── main loop — display only, stays on main thread ───────
+
+    def run(self):
+        # Window may already exist from calibration — namedWindow is a no-op
+        # if the window already exists, so this is always safe.
+        cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(DISPLAY_WIN, 900, 500)
+
+        if not self._use_ros_camera:
+            t = threading.Thread(target=self._capture_loop)
+            t.daemon = True
+            t.start()
+
+        while not rospy.is_shutdown():
+            with self._frame_lock:
+                frame = self._latest_frame
 
             if frame is not None:
                 try:
@@ -754,7 +765,7 @@ class ChessVisionNode(object):
                 except Exception as e:
                     rospy.logwarn_throttle(5, "Display error: %s", e)
 
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(30) & 0xFF
             if key in (ord('b'), ord('B')):
                 with self._frame_lock:
                     f = self._latest_frame
