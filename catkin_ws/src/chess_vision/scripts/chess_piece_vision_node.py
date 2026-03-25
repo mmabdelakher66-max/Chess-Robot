@@ -79,7 +79,7 @@ VOTE_FRAMES         = 3
 #   Too high → destination square not detected (your h4 was 14.3).
 #   Recommended range: 12 – 20.  Start at 12 if moves are missed.
 #
-OCC_THRESHOLD       = 15.0
+OCC_THRESHOLD       = 12.0
 #
 # LIGHTING_DRIFT_MAX (default 6)
 #   If the board-wide mean delta exceeds this, subtract it as
@@ -511,6 +511,16 @@ class MoveDetector(object):
         self.grace_start     = 0.0
         self.grace_baseline  = None   # snapshot at start of grace
 
+        # Pre-move snapshot: saved when motion first detected.
+        # Used as the "before" reference in _analyse_vote so that
+        # piece shadows and lighting are identical in before/after frames.
+        self._last_stable_frame = None
+        self.pre_move_frame     = None
+
+        # Set True when engine_move published; vision waits for
+        # physical board change then re-baselines WITHOUT publishing.
+        self._expecting_engine  = False
+
         self._baseline_ready = False
         self._lock           = threading.Lock()
 
@@ -569,13 +579,22 @@ class MoveDetector(object):
         if not self._baseline_ready:
             self.baseline.update(frame)
             self._baseline_ready = True
+            self._last_stable_frame = frame
             return
 
         if motion:
+            # Save the last quiet frame as fresh "before" reference for this vote.
+            # It has the same lighting/shadows as the post-move frame, so piece
+            # shadows from other pieces cancel out completely.
+            if self._last_stable_frame is not None:
+                self.pre_move_frame = self._last_stable_frame
+            else:
+                self.pre_move_frame = frame
             self.state = STATE_MOTION
             self.stable_count = 0
             rospy.logdebug("IDLE -> MOTION  delta=%.2f", delta)
         else:
+            self._last_stable_frame = frame
             self.idle_count += 1
             if self.idle_count >= BASELINE_IDLE_LOCK:
                 # Very slow baseline drift correction
@@ -613,15 +632,24 @@ class MoveDetector(object):
         self.vote_frames = []
 
         if move:
-            rospy.loginfo("Move detected: %s", move)
-            self.move_pub.publish(move)
-            # Start grace window for capture cleanup
-            self.state = STATE_GRACE
-            self.grace_start = time.time()
-            self.grace_baseline = copy.deepcopy(self.baseline)
-            # Update baseline to post-move state
-            self.baseline.update(frame)
-            self.idle_count = 0
+            if self._expecting_engine:
+                # This is the engine's physical move being placed on the board.
+                # Do NOT publish it as a human move — just re-baseline.
+                rospy.loginfo("Engine move physically executed (%s) — re-baselining", move)
+                self._expecting_engine = False
+                self.baseline.update(frame)
+                self.state = STATE_IDLE
+                self.idle_count = 0
+            else:
+                rospy.loginfo("Move detected: %s", move)
+                self.move_pub.publish(move)
+                # Start grace window for capture cleanup
+                self.state = STATE_GRACE
+                self.grace_start = time.time()
+                self.grace_baseline = copy.deepcopy(self.baseline)
+                # Update baseline to post-move state
+                self.baseline.update(frame)
+                self.idle_count = 0
         else:
             # False trigger — update baseline and return to idle
             self.baseline.update(frame)
@@ -631,42 +659,60 @@ class MoveDetector(object):
     def _grace(self, frame, motion, delta):
         elapsed = time.time() - self.grace_start
         if elapsed > GRACE_WINDOW_SEC:
+            # Grace expired naturally — baseline the now-settled board
+            self.baseline.update(frame)
+            self._last_stable_frame = frame
             self.state = STATE_IDLE
             self.idle_count = 0
-            rospy.logdebug("Grace window expired")
+            rospy.logdebug("Grace window expired — re-baselined")
             return
 
         if motion:
-            return  # ignore motion during grace
+            return  # ignore motion during grace (hand removing captured piece)
 
         # Check for single-square cleanup (captured piece removal)
         dm = self.baseline.delta_map(frame)
         changed = [sq for sq, d in dm.items() if d > OCC_THRESHOLD]
 
         if 0 < len(changed) <= CAPTURE_CLEANUP_MAX:
-            # Treat as cleanup
+            # Publish cleanup event but do NOT update baseline here.
+            # The user's hand may still be in frame.  Grace expires
+            # naturally and will baseline the clean board.
             for sq in changed:
                 rospy.loginfo("Cleanup event: %s", sq)
                 self.cleanup_pub.publish("cleanup:" + sq)
-            self.baseline.update(frame)
-            self.state = STATE_IDLE
-            self.idle_count = 0
 
     def _analyse_vote(self):
         """
-        Find the two squares with the highest average delta vs baseline.
-        Log every changed square so the user can verify coordinate mapping.
+        Find the two squares with the highest average delta.
+
+        KEY: uses pre_move_frame (saved just before motion started) as the
+        "before" reference instead of the aging baseline.  Both frames are
+        taken within seconds of each other, so all piece shadows and
+        reflections are IDENTICAL and cancel out in the diff.  Only squares
+        where a piece actually moved will show large delta.
+
         Returns UCI string (src+dst) or None.
         """
+        # Build per-square reference means from the pre-move snapshot.
+        # Fall back to stored baseline if no snapshot is available.
+        if self.pre_move_frame is not None:
+            ref_means = {}
+            for name, pts in self.sqdict.items():
+                ref_means[name] = patch_mean(self.pre_move_frame, pts)
+            rospy.logdebug("Using pre-move snapshot as vote reference")
+        else:
+            ref_means = self.baseline.means
+            rospy.logdebug("No pre-move snapshot — using baseline")
+
         # Accumulate per-square delta across all vote frames
         delta_acc = {}
         for frame in self.vote_frames:
-            dm = self.baseline.delta_map(frame)
-            global_mean = float(np.mean(list(dm.values())))
-            if global_mean > LIGHTING_DRIFT_MAX:
-                dm = {sq: max(0.0, d - global_mean) for sq, d in dm.items()}
-            for sq, d in dm.items():
-                delta_acc[sq] = delta_acc.get(sq, 0.0) + d
+            for name, pts in self.sqdict.items():
+                after  = patch_mean(frame, pts)
+                before = ref_means.get(name, after)
+                d      = abs(after - before)
+                delta_acc[name] = delta_acc.get(name, 0.0) + d
 
         n = max(len(self.vote_frames), 1)
         ranked = sorted(delta_acc.items(), key=lambda x: -x[1])
@@ -700,21 +746,19 @@ class MoveDetector(object):
         last = self.vote_frames[-1]
         cur1 = patch_mean(last, self.sqdict[sq1])
         cur2 = patch_mean(last, self.sqdict[sq2])
-        b1   = self.baseline.means.get(sq1, cur1)
-        b2   = self.baseline.means.get(sq2, cur2)
+        b1   = ref_means.get(sq1, cur1)
+        b2   = ref_means.get(sq2, cur2)
 
         chg1 = abs(cur1 - b1)
         chg2 = abs(cur2 - b2)
 
-        # If one square changed drastically more, it is the source (piece lifted off).
-        # If they're similar, fall back to rank order (sq1 had highest delta overall).
         if chg1 >= chg2:
             src, dst = sq1, sq2
         else:
             src, dst = sq2, sq1
 
-        rospy.loginfo("  sq1=%s cur=%.1f base=%.1f |chg|=%.1f", sq1, cur1, b1, chg1)
-        rospy.loginfo("  sq2=%s cur=%.1f base=%.1f |chg|=%.1f", sq2, cur2, b2, chg2)
+        rospy.loginfo("  sq1=%s cur=%.1f ref=%.1f |chg|=%.1f", sq1, cur1, b1, chg1)
+        rospy.loginfo("  sq2=%s cur=%.1f ref=%.1f |chg|=%.1f", sq2, cur2, b2, chg2)
 
         rospy.loginfo("Best move candidate: %s -> %s  (delta %.1f -> %.1f)",
                       src, dst, d1, d2)
@@ -958,8 +1002,20 @@ def main():
             detector.vote_frames  = []
             detector._baseline_ready = True
 
+    def _on_engine_move(msg):
+        """Engine played — wait for user to physically make that move, then re-baseline."""
+        rospy.loginfo("Engine move: %s — waiting for physical execution on board", msg.data)
+        with detector._lock:
+            detector._expecting_engine = True
+            # Reset to IDLE so we can detect the physical motion
+            detector.state        = STATE_IDLE
+            detector.stable_count = 0
+            detector.idle_count   = 0
+            detector.vote_frames  = []
+
     rospy.Subscriber('/chess_vision/move_rejected', String, _on_move_rejected, queue_size=5)
     rospy.Subscriber('/chess_vision/game_reset',    String, _on_game_reset,    queue_size=5)
+    rospy.Subscriber('/chess_vision/engine_move',   String, _on_engine_move,   queue_size=5)
 
     if show:
         disp_thread = DisplayThread(detector)

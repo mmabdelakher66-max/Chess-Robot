@@ -453,7 +453,7 @@ game_reset_pub    = None
 # ──────────────────────────────────────────────────────────────
 
 def main():
-    global engine_move_pub
+    global engine_move_pub, move_rejected_pub, game_reset_pub
 
     rospy.init_node('chess_gui_stockfish_node', anonymous=False)
 
