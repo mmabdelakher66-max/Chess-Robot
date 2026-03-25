@@ -744,8 +744,13 @@ class ChessVisionNode(object):
     # ── main loop — display only, stays on main thread ───────
 
     def run(self):
-        # Window may already exist from calibration — namedWindow is a no-op
-        # if the window already exists, so this is always safe.
+        # Required on Ubuntu 18.04 GTK backend — starts the GTK event loop
+        # so imshow actually paints the window instead of leaving it black.
+        try:
+            cv2.startWindowThread()
+        except Exception:
+            pass
+
         cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(DISPLAY_WIN, 900, 500)
 
@@ -754,6 +759,7 @@ class ChessVisionNode(object):
             t.daemon = True
             t.start()
 
+        frame_count = 0
         while not rospy.is_shutdown():
             with self._frame_lock:
                 frame = self._latest_frame
@@ -761,9 +767,13 @@ class ChessVisionNode(object):
             if frame is not None:
                 try:
                     disp = make_display(frame, self.detector)
-                    cv2.imshow(DISPLAY_WIN, disp)
                 except Exception as e:
-                    rospy.logwarn_throttle(5, "Display error: %s", e)
+                    rospy.logwarn_throttle(2, "make_display error: %s", e)
+                    disp = frame  # fallback: show raw frame
+                cv2.imshow(DISPLAY_WIN, disp)
+                frame_count += 1
+                if frame_count == 1:
+                    rospy.loginfo("[vision] First frame displayed OK")
 
             key = cv2.waitKey(30) & 0xFF
             if key in (ord('b'), ord('B')):
