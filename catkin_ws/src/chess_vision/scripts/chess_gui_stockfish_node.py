@@ -225,9 +225,20 @@ class ChessGUI(object):
             if promo in self.board.legal_moves:
                 move = promo
             else:
-                self._set_status("Illegal move: " + uci_str)
-                rospy.logwarn("Illegal move: %s  FEN: %s", uci_str, self.board.fen())
-                return
+                # Try reversed src<->dst (vision sometimes gets src/dst swapped)
+                rev_uci = uci_str[2:4] + uci_str[0:2]
+                rev_move = chess.Move.from_uci(rev_uci)
+                if rev_move in self.board.legal_moves:
+                    rospy.loginfo("Reversed move accepted: %s -> %s", uci_str, rev_uci)
+                    move = rev_move
+                else:
+                    rev_promo = chess.Move.from_uci(rev_uci + 'q')
+                    if rev_promo in self.board.legal_moves:
+                        move = rev_promo
+                    else:
+                        self._set_status("Illegal move: " + uci_str)
+                        rospy.logwarn("Illegal move: %s  FEN: %s", uci_str, self.board.fen())
+                        return
 
         self.board.push(move)
         self.last_move = move

@@ -584,63 +584,64 @@ class MoveDetector(object):
 
     def _analyse_vote(self):
         """
-        Compare each vote frame against baseline.
-        Use majority vote per square on occupancy change direction.
-        Returns UCI string or None.
+        Find the two squares with the highest average delta vs baseline.
+        Log every changed square so the user can verify coordinate mapping.
+        Returns UCI string (src+dst) or None.
         """
-        # Build occupancy votes
-        became_empty = {}   # sq -> vote count
-        became_filled = {}
-
+        # Accumulate per-square delta across all vote frames
+        delta_acc = {}
         for frame in self.vote_frames:
             dm = self.baseline.delta_map(frame)
-            # Global lighting drift rejection
-            all_deltas = list(dm.values())
-            global_mean = float(np.mean(all_deltas))
+            global_mean = float(np.mean(list(dm.values())))
             if global_mean > LIGHTING_DRIFT_MAX:
-                # Subtract global drift
                 dm = {sq: max(0.0, d - global_mean) for sq, d in dm.items()}
-
             for sq, d in dm.items():
-                if d > OCC_THRESHOLD:
-                    # determine direction by comparing patch mean to baseline mean
-                    cur_mean = patch_mean(self.vote_frames[-1], self.sqdict[sq])
-                    base_mean = self.baseline.means.get(sq, cur_mean)
-                    if cur_mean < base_mean - OCC_THRESHOLD * 0.5:
-                        # square got darker relative to baseline → piece moved away (empty)
-                        became_empty[sq] = became_empty.get(sq, 0) + 1
-                    else:
-                        became_filled[sq] = became_filled.get(sq, 0) + 1
+                delta_acc[sq] = delta_acc.get(sq, 0.0) + d
 
-        # Majority threshold: more than half the vote frames
-        majority = len(self.vote_frames) / 2.0
-        src_sq = [sq for sq, v in became_empty.items() if v > majority]
-        dst_sq = [sq for sq, v in became_filled.items() if v > majority]
+        n = max(len(self.vote_frames), 1)
+        ranked = sorted(delta_acc.items(), key=lambda x: -x[1])
 
-        # Need at least one change
-        total_changed = len(set(src_sq) | set(dst_sq))
-        if total_changed < MIN_CHANGED_SQ:
+        # Always log top-6 so user can verify coordinate mapping
+        rospy.loginfo("=== VOTE RESULT — top changed squares ===")
+        for sq, acc in ranked[:6]:
+            avg = acc / n
+            marker = " <<< CHANGED" if avg > OCC_THRESHOLD else ""
+            rospy.loginfo("  %s : avg_delta=%.1f%s", sq, avg, marker)
+
+        above = [(sq, acc / n) for sq, acc in ranked if acc / n > OCC_THRESHOLD]
+
+        if len(above) < 2:
+            rospy.loginfo("Only %d square(s) above threshold %.1f — ignoring (false trigger)",
+                          len(above), OCC_THRESHOLD)
             return None
 
-        # Normal move: 1 source + 1 dest
-        if len(src_sq) == 1 and len(dst_sq) == 1:
-            return src_sq[0] + dst_sq[0]
+        sq1, d1 = above[0]
+        sq2, d2 = above[1]
 
-        # Capture: piece moves to occupied square (dest was already occupied)
-        # Both source empty + dest refilled — pick highest delta
-        if len(src_sq) >= 1 and len(dst_sq) >= 1:
-            # pick best scored
-            frame = self.vote_frames[-1]
-            best_src = max(src_sq, key=lambda sq: self.baseline.delta_map(frame).get(sq, 0))
-            best_dst = max(dst_sq, key=lambda sq: self.baseline.delta_map(frame).get(sq, 0))
-            return best_src + best_dst
+        # Determine src vs dst:
+        # The source square had a piece in baseline and is now empty.
+        # The destination was empty and now has a piece.
+        # Heuristic: compare current patch mean to baseline mean.
+        # Bigger absolute change = more likely to be src (piece lifted).
+        last = self.vote_frames[-1]
+        cur1 = patch_mean(last, self.sqdict[sq1])
+        cur2 = patch_mean(last, self.sqdict[sq2])
+        b1   = self.baseline.means.get(sq1, cur1)
+        b2   = self.baseline.means.get(sq2, cur2)
 
-        # Fallback: only source (piece removed — cleanup, not a move)
-        if len(src_sq) >= 1 and len(dst_sq) == 0:
-            return None
+        # Raw signed change: positive = brighter now, negative = darker now
+        chg1 = abs(cur1 - b1)
+        chg2 = abs(cur2 - b2)
 
-        # Fallback: only dest (piece appeared — ignore)
-        return None
+        # Bigger absolute change = the square that changed the most = source
+        if chg1 >= chg2:
+            src, dst = sq1, sq2
+        else:
+            src, dst = sq2, sq1
+
+        rospy.loginfo("Best move candidate: %s -> %s  (delta %.1f -> %.1f)",
+                      src, dst, d1, d2)
+        return src + dst
 
     def _pub_state(self, frame, motion, delta):
         dm = self.baseline.delta_map(frame) if self._baseline_ready else {}
@@ -695,21 +696,41 @@ def open_local_camera(index=0):
 # Display thread
 # ──────────────────────────────────────────────────────────────
 
+def _sq_under_point(sqdict, x, y):
+    """Return the square name whose polygon contains pixel (x, y), or ''."""
+    for name, pts in sqdict.items():
+        poly = pts.astype(np.float32).reshape((-1, 1, 2))
+        if cv2.pointPolygonTest(poly, (float(x), float(y)), False) >= 0:
+            return name
+    return ''
+
+
 class DisplayThread(threading.Thread):
     def __init__(self, detector):
         super(DisplayThread, self).__init__()
-        self.detector = detector
-        self.daemon = True
-        self._running = True
+        self.detector  = detector
+        self.daemon    = True
+        self._running  = True
+        self._mouse_x  = 0
+        self._mouse_y  = 0
 
     def run(self):
+        WIN = "Chess Vision"
+        cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+
+        def on_mouse(event, x, y, flags, param):
+            self._mouse_x = x
+            self._mouse_y = y
+
+        cv2.setMouseCallback(WIN, on_mouse)
+
         while self._running and not rospy.is_shutdown():
             with self.detector._lock:
-                frame = self.detector.last_frame
+                frame  = self.detector.last_frame
                 sqdict = self.detector.sqdict
-                dm = self.detector.baseline.delta_map(frame) if (
+                dm     = self.detector.baseline.delta_map(frame) if (
                     frame is not None and self.detector._baseline_ready) else {}
-                state = self.detector.state
+                state  = self.detector.state
 
             if frame is None:
                 time.sleep(0.05)
@@ -719,20 +740,32 @@ class DisplayThread(threading.Thread):
             h, w = disp.shape[:2]
 
             for name, pts in sqdict.items():
-                ctr = poly_center(pts).astype(int)
-                d = dm.get(name, 0.0)
+                ctr     = poly_center(pts).astype(int)
+                d       = dm.get(name, 0.0)
                 changed = d > OCC_THRESHOLD
-                color = (0, 0, 220) if changed else (0, 200, 0)
-                cv2.polylines(disp, [pts.astype(np.int32).reshape(-1,1,2)],
+                color   = (0, 0, 220) if changed else (0, 200, 0)
+                cv2.polylines(disp,
+                              [pts.astype(np.int32).reshape(-1, 1, 2)],
                               True, color, 1)
-                cv2.putText(disp, name, tuple(ctr - np.array([14,5])),
+                cv2.putText(disp, name,
+                            tuple(ctr - np.array([14, 5])),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.32, color, 1)
 
-            status = "State:%s  " % state
-            cv2.putText(disp, status, (10, h-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
+            # Mouse-hover: show which square the cursor is over
+            hovered = _sq_under_point(sqdict, self._mouse_x, self._mouse_y)
+            if hovered:
+                hover_pts = sqdict[hovered].astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(disp, [hover_pts], True, (0, 255, 255), 2)
+                cv2.putText(disp, ">> " + hovered,
+                            (self._mouse_x + 10, self._mouse_y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            cv2.imshow("Chess Vision", disp)
+            status = "State:%-12s  Hover: %-4s  (move mouse to verify squares)" % (
+                state, hovered)
+            cv2.putText(disp, status, (6, h - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+            cv2.imshow(WIN, disp)
             if cv2.waitKey(30) & 0xFF == ord('q'):
                 rospy.signal_shutdown("User quit display")
                 break
