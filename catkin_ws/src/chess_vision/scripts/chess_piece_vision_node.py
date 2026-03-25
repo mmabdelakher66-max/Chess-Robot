@@ -531,94 +531,46 @@ class MoveDetector(object):
         self.stable_count = 0
 
 
-# ──────────────────────────────────────────────────────────────
-# Display thread
-# ──────────────────────────────────────────────────────────────
+def make_display(frame, detector):
+    """Build the display image on the main thread."""
+    with detector._lock:
+        H        = detector.H
+        before_w = detector.before_w
+        state    = detector.state
 
-class DisplayThread(threading.Thread):
-    def __init__(self, detector):
-        super(DisplayThread, self).__init__()
-        self.detector = detector
-        self.daemon   = True
-        self._frame   = None
-        self._lock    = threading.Lock()
+    warped = warp_board(frame, H)
 
-    def set_frame(self, frame):
-        with self._lock:
-            self._frame = frame
+    disp_warp = warped.copy()
+    for i in range(1, 8):
+        cv2.line(disp_warp, (i * SQ_PIX, 0), (i * SQ_PIX, BOARD_PIX), (80, 80, 80), 1)
+        cv2.line(disp_warp, (0, i * SQ_PIX), (BOARD_PIX, i * SQ_PIX), (80, 80, 80), 1)
+    for col in range(8):
+        cv2.putText(disp_warp, FILES[col], (col * SQ_PIX + 2, 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    for row in range(8):
+        cv2.putText(disp_warp, str(8 - row), (2, row * SQ_PIX + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    cv2.putText(disp_warp, "State:" + state, (5, BOARD_PIX - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
 
-    def run(self):
-        cv2.namedWindow("Chess Vision", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Chess Vision", 900, 450)
-        while not rospy.is_shutdown():
-            with self._lock:
-                frame = self._frame
-            if frame is None:
-                time.sleep(0.03)
-                continue
+    if before_w is not None:
+        diff_bright = cv2.convertScaleAbs(cv2.absdiff(before_w, warped), alpha=3.0)
+        combined = np.hstack([disp_warp, diff_bright])
+    else:
+        combined = disp_warp
 
-            with self.detector._lock:
-                H       = self.detector.H
-                before_w = self.detector.before_w
-                state   = self.detector.state
-
-            warped = warp_board(frame, H)
-
-            # Draw grid + state on warped
-            disp_warp = warped.copy()
-            for i in range(1, 8):
-                cv2.line(disp_warp, (i * SQ_PIX, 0), (i * SQ_PIX, BOARD_PIX),
-                         (80, 80, 80), 1)
-                cv2.line(disp_warp, (0, i * SQ_PIX), (BOARD_PIX, i * SQ_PIX),
-                         (80, 80, 80), 1)
-            # File/rank labels
-            for col in range(8):
-                cv2.putText(disp_warp, FILES[col],
-                            (col * SQ_PIX + 2, 14),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            for row in range(8):
-                cv2.putText(disp_warp, str(8 - row),
-                            (2, row * SQ_PIX + 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.putText(disp_warp, "State:" + state, (5, BOARD_PIX - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
-
-            # Show diff vs before_w
-            if before_w is not None:
-                diff = cv2.absdiff(before_w, warped)
-                diff_bright = cv2.convertScaleAbs(diff, alpha=3.0)
-                combined = np.hstack([disp_warp, diff_bright])
-            else:
-                combined = disp_warp
-
-            # Resize raw for display
-            h, w = frame.shape[:2]
-            scale = 450.0 / h
-            raw_small = cv2.resize(frame, (int(w * scale), 450))
-            disp_h = max(combined.shape[0], raw_small.shape[0])
-            # pad to same height
-            if combined.shape[0] < disp_h:
-                pad = np.zeros((disp_h - combined.shape[0],
-                                combined.shape[1], 3), np.uint8)
-                combined = np.vstack([combined, pad])
-            if raw_small.shape[0] < disp_h:
-                pad = np.zeros((disp_h - raw_small.shape[0],
-                                raw_small.shape[1], 3), np.uint8)
-                raw_small = np.vstack([raw_small, pad])
-            display = np.hstack([combined, raw_small])
-            cv2.imshow("Chess Vision", display)
-
-            key = cv2.waitKey(30) & 0xFF
-            if key in (ord('b'), ord('B')):
-                with self.detector._lock:
-                    self.detector.before_w = warp_board(frame, H)
-                    self.detector.state    = STATE_IDLE
-                    self.detector.stable_count = 0
-                rospy.loginfo("[vision] Manual before_w reset (B key)")
-            elif key in (ord('q'), ord('Q')):
-                rospy.signal_shutdown("User quit")
-
-        cv2.destroyAllWindows()
+    h, w = frame.shape[:2]
+    raw_small = cv2.resize(frame, (int(w * 450.0 / h), 450))
+    disp_h = max(combined.shape[0], raw_small.shape[0])
+    if combined.shape[0] < disp_h:
+        combined = np.vstack([combined,
+                              np.zeros((disp_h - combined.shape[0],
+                                        combined.shape[1], 3), np.uint8)])
+    if raw_small.shape[0] < disp_h:
+        raw_small = np.vstack([raw_small,
+                               np.zeros((disp_h - raw_small.shape[0],
+                                         raw_small.shape[1], 3), np.uint8)])
+    return np.hstack([combined, raw_small])
 
 
 # ──────────────────────────────────────────────────────────────
@@ -674,8 +626,8 @@ class ChessVisionNode(object):
             frame = apply_transform(frame, self.rotate, self.mirror)
             self.detector.set_initial_baseline(frame)
 
-        self.display = DisplayThread(self.detector)
-        self.display.start()
+        self._latest_frame = None
+        self._frame_lock   = threading.Lock()
 
         # GUI feedback subscriptions
         rospy.Subscriber('/chess_vision/move_rejected', String,
@@ -709,28 +661,55 @@ class ChessVisionNode(object):
 
     def _on_ros_image(self, msg):
         try:
-            arr  = np.frombuffer(msg.data, np.uint8)
+            arr   = np.frombuffer(msg.data, np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if frame is not None:
                 frame = apply_transform(frame, self.rotate, self.mirror)
                 self.detector.feed(frame)
-                self.display.set_frame(frame)
+                with self._frame_lock:
+                    self._latest_frame = frame
         except Exception as e:
             rospy.logwarn_throttle(5, "ROS image decode error: %s", e)
 
-    # ── main loop ────────────────────────────────────────────
+    # ── main loop (must stay on main thread for cv2.imshow) ──
 
     def run(self):
-        rate = rospy.Rate(20)
+        cv2.namedWindow("Chess Vision", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Chess Vision", 900, 450)
+
         while not rospy.is_shutdown():
+            # Get frame
             if not self._use_ros_camera:
                 ret, frame = self.cap.read()
                 if ret and frame is not None:
                     frame = apply_transform(frame, self.rotate, self.mirror)
                     self.detector.feed(frame)
-                    self.display.set_frame(frame)
-            rate.sleep()
+                    with self._frame_lock:
+                        self._latest_frame = frame
+            else:
+                with self._frame_lock:
+                    frame = self._latest_frame
+
+            # Display
+            if frame is not None:
+                disp = make_display(frame, self.detector)
+                cv2.imshow("Chess Vision", disp)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord('b'), ord('B')):
+                with self._frame_lock:
+                    f = self._latest_frame
+                if f is not None:
+                    with self.detector._lock:
+                        self.detector.before_w     = warp_board(f, self.detector.H)
+                        self.detector.state        = STATE_IDLE
+                        self.detector.stable_count = 0
+                    rospy.loginfo("[vision] Manual before_w reset (B key)")
+            elif key in (ord('q'), ord('Q')):
+                break
+
         self.cap.release()
+        cv2.destroyAllWindows()
 
 
 # ──────────────────────────────────────────────────────────────
