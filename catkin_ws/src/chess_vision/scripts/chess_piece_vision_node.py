@@ -166,14 +166,21 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
             rospy.loginfo("Click %d: (%d,%d) => %s",
                           len(clicks), x, y, CORNER_NAMES[len(clicks) - 1])
 
+    # Flush camera buffer — first frames are often black on USB cameras
+    rospy.loginfo("Warming up camera…")
+    for _ in range(60):
+        cap.read()
+    time.sleep(0.3)
+
     frame = None
     for _ in range(30):
-        ret, frame = cap.read()
-        if ret and frame is not None:
+        ret, raw = cap.read()
+        if ret and raw is not None and np.mean(raw) > 2:
+            frame = apply_transform(raw, rotate_deg, mirror)
             break
-        time.sleep(0.1)
+        time.sleep(0.05)
     if frame is None:
-        rospy.logerr("Cannot read from camera during calibration")
+        rospy.logerr("Camera returns black frames — check cable/index")
         return None
 
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
@@ -183,13 +190,43 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
     H = None
     while True:
         ret, raw = cap.read()
-        if ret and raw is not None:
+        if ret and raw is not None and np.mean(raw) > 2:
             frame = apply_transform(raw, rotate_deg, mirror)
 
         disp = frame.copy()
         h, w = disp.shape[:2]
 
-        # corner labels
+        # Draw estimated 8x8 grid if >= 2 corners clicked
+        if len(clicks) >= 2:
+            # Use available corners + image edges to estimate grid
+            src_pts = list(clicks)
+            if len(src_pts) == 4:
+                tl = np.array(src_pts[0], dtype=np.float32)
+                tr = np.array(src_pts[1], dtype=np.float32)
+                br = np.array(src_pts[2], dtype=np.float32)
+                bl = np.array(src_pts[3], dtype=np.float32)
+                for i in range(9):
+                    t = i / 8.0
+                    p1 = ((1 - t) * tl + t * tr).astype(int)
+                    p2 = ((1 - t) * bl + t * br).astype(int)
+                    p3 = ((1 - t) * tl + t * bl).astype(int)
+                    p4 = ((1 - t) * tr + t * br).astype(int)
+                    cv2.line(disp, tuple(p1), tuple(p2), (0, 200, 0), 1)
+                    cv2.line(disp, tuple(p3), tuple(p4), (0, 200, 0), 1)
+                # Label squares
+                for row in range(8):
+                    for col in range(8):
+                        u = (col + 0.5) / 8.0
+                        v = (row + 0.5) / 8.0
+                        top  = (1 - u) * tl + u * tr
+                        bot  = (1 - u) * bl + u * br
+                        cx   = int(((1 - v) * top + v * bot)[0])
+                        cy   = int(((1 - v) * top + v * bot)[1])
+                        name = FILES[col] + str(8 - row)
+                        cv2.putText(disp, name, (cx - 10, cy + 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 0), 1)
+
+        # Corner labels at image corners
         lbl_pos = [(8, 28), (w - 80, 28), (w - 80, h - 8), (8, h - 8)]
         for lbl, pos in zip(CORNER_NAMES, lbl_pos):
             cv2.putText(disp, lbl, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.9,
@@ -201,16 +238,29 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if len(clicks) == 4:
-            pts = np.array(clicks, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(disp, [pts], True, (0, 255, 0), 2)
+            pts_poly = np.array(clicks, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(disp, [pts_poly], True, (0, 255, 0), 2)
             cv2.putText(disp, "Press S to save, R to retry",
                         (10, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                         (255, 255, 0), 2)
-            # show preview warp
+            # Warped preview embedded bottom-right
             src = np.array(clicks, dtype=np.float32)
             H_preview = cv2.getPerspectiveTransform(src, DST_PTS)
             warped = warp_board(frame, H_preview)
-            cv2.imshow("Warped preview", warped)
+            # draw grid on warped preview
+            for i in range(1, 8):
+                cv2.line(warped, (i * SQ_PIX, 0), (i * SQ_PIX, BOARD_PIX), (0, 200, 0), 1)
+                cv2.line(warped, (0, i * SQ_PIX), (BOARD_PIX, i * SQ_PIX), (0, 200, 0), 1)
+            for row in range(8):
+                for col in range(8):
+                    cv2.putText(warped,
+                                FILES[col] + str(8 - row),
+                                (col * SQ_PIX + 2, row * SQ_PIX + 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.28, (0, 255, 255), 1)
+            # scale warped to fit bottom-right corner
+            scale   = min(w, h) // 3
+            preview = cv2.resize(warped, (scale, scale))
+            disp[h - scale:h, w - scale:w] = preview
 
         status = "Clicks: %d/4" % len(clicks)
         if len(clicks) < 4:
@@ -230,15 +280,15 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
                 src = np.array(clicks, dtype=np.float32)
                 H = cv2.getPerspectiveTransform(src, DST_PTS)
                 save_homography(hom_path, H)
-                cv2.destroyAllWindows()
+                cv2.destroyWindow(WIN)
                 return H
             else:
                 rospy.logwarn("Need 4 clicks first")
         elif key in (ord('q'), ord('Q')):
-            cv2.destroyAllWindows()
+            cv2.destroyWindow(WIN)
             return None
 
-    cv2.destroyAllWindows()
+    cv2.destroyWindow(WIN)
     return None
 
 
