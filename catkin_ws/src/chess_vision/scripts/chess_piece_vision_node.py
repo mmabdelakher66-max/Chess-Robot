@@ -138,28 +138,31 @@ def is_occupied(img, pts, baseline_mean, threshold=35.0):
 # ──────────────────────────────────────────────────────────────
 # Corner → chess-square mapping for every rotate+mirror combo
 #
-# Physical board with WHITE sitting at TOP of camera image:
-#   image-TL = h1,  image-TR = a1,  image-BR = a8,  image-BL = h8
+# Physical camera view (raw, rotate=0, no mirror):
+#   TL = a8  (black queenside rook corner)
+#   TR = h8  (black kingside rook corner)
+#   BR = h1  (white kingside rook corner)
+#   BL = a1  (white queenside rook corner)
 #
-# After apply_transform(rotate, mirror) those corners move:
-#   (TL, TR, BR, BL) chess squares for each transform:
+# After apply_transform(rotate, mirror) those corners shift.
+# Table gives (TL_sq, TR_sq, BR_sq, BL_sq) in the DISPLAYED image.
 # ──────────────────────────────────────────────────────────────
 _CORNER_MAP = {
     # (rotate_deg, mirror): (TL_sq, TR_sq, BR_sq, BL_sq)
-    (0,   False): ('h1', 'a1', 'a8', 'h8'),
-    (90,  False): ('h8', 'h1', 'a1', 'a8'),
-    (180, False): ('a8', 'h8', 'h1', 'a1'),
-    (270, False): ('a1', 'a8', 'h8', 'h1'),
-    (0,   True):  ('a1', 'h1', 'h8', 'a8'),
-    (90,  True):  ('h1', 'h8', 'a8', 'a1'),
-    (180, True):  ('h8', 'a8', 'a1', 'h1'),
-    (270, True):  ('a8', 'a1', 'h1', 'h8'),
+    (0,   False): ('a8', 'h8', 'h1', 'a1'),
+    (90,  False): ('a1', 'a8', 'h8', 'h1'),
+    (180, False): ('h1', 'a1', 'a8', 'h8'),
+    (270, False): ('h8', 'h1', 'a1', 'a8'),
+    (0,   True):  ('h8', 'a8', 'a1', 'h1'),
+    (90,  True):  ('a8', 'a1', 'h1', 'h8'),
+    (180, True):  ('a1', 'h1', 'h8', 'a8'),
+    (270, True):  ('h1', 'h8', 'a8', 'a1'),
 }
 
 def get_corner_names(rotate_deg, mirror):
     """Return [TL, TR, BR, BL] chess square names for this transform."""
     key = (rotate_deg % 360, bool(mirror))
-    return list(_CORNER_MAP.get(key, ('h1', 'a1', 'a8', 'h8')))
+    return list(_CORNER_MAP.get(key, ('a8', 'h8', 'h1', 'a1')))
 
 
 def calibrate_interactive(cap, rotate_deg, mirror, sqdict_path):
