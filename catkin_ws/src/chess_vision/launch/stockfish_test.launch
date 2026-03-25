@@ -11,7 +11,7 @@
   <node name="chess_vision_node"
         pkg="chess_vision"
         type="chess_piece_vision_node.py"
-        output="screen"
+        output="log"
         respawn="false">
     <param name="rotate"    type="int"  value="$(arg rotate)"/>
     <param name="mirror"    type="bool" value="$(arg mirror)"/>

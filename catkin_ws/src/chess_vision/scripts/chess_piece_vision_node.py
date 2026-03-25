@@ -587,45 +587,34 @@ class MoveDetector(object):
 
 
 def make_display(frame, detector):
-    """Build the display image on the main thread."""
+    """Build the display image: raw camera (resized) | warped board | diff."""
     with detector._lock:
         H        = detector.H
         before_w = detector.before_w
         state    = detector.state
 
-    warped = warp_board(frame, H)
+    TARGET_H = 400
 
-    disp_warp = warped.copy()
-    for i in range(1, 8):
-        cv2.line(disp_warp, (i * SQ_PIX, 0), (i * SQ_PIX, BOARD_PIX), (80, 80, 80), 1)
-        cv2.line(disp_warp, (0, i * SQ_PIX), (BOARD_PIX, i * SQ_PIX), (80, 80, 80), 1)
-    for col in range(8):
-        cv2.putText(disp_warp, FILES[col], (col * SQ_PIX + 2, 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-    for row in range(8):
-        cv2.putText(disp_warp, str(8 - row), (2, row * SQ_PIX + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-    cv2.putText(disp_warp, "State:" + state, (5, BOARD_PIX - 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
-
-    if before_w is not None:
-        diff_bright = cv2.convertScaleAbs(cv2.absdiff(before_w, warped), alpha=3.0)
-        combined = np.hstack([disp_warp, diff_bright])
-    else:
-        combined = disp_warp
-
+    # Raw camera resized to TARGET_H
     h, w = frame.shape[:2]
-    raw_small = cv2.resize(frame, (int(w * 450.0 / h), 450))
-    disp_h = max(combined.shape[0], raw_small.shape[0])
-    if combined.shape[0] < disp_h:
-        combined = np.vstack([combined,
-                              np.zeros((disp_h - combined.shape[0],
-                                        combined.shape[1], 3), np.uint8)])
-    if raw_small.shape[0] < disp_h:
-        raw_small = np.vstack([raw_small,
-                               np.zeros((disp_h - raw_small.shape[0],
-                                         raw_small.shape[1], 3), np.uint8)])
-    return np.hstack([combined, raw_small])
+    raw_small = cv2.resize(frame, (int(w * TARGET_H / h), TARGET_H))
+
+    # Warped board (already 400x400)
+    warped = warp_board(frame, H)
+    board_disp = warped.copy()
+    for i in range(1, 8):
+        cv2.line(board_disp, (i*SQ_PIX, 0), (i*SQ_PIX, BOARD_PIX), (60, 60, 60), 1)
+        cv2.line(board_disp, (0, i*SQ_PIX), (BOARD_PIX, i*SQ_PIX), (60, 60, 60), 1)
+    cv2.putText(board_disp, state, (4, 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+    # Diff panel
+    if before_w is not None:
+        diff = cv2.convertScaleAbs(cv2.absdiff(before_w, warped), alpha=4.0)
+    else:
+        diff = np.zeros((BOARD_PIX, BOARD_PIX, 3), np.uint8)
+
+    return np.hstack([raw_small, board_disp, diff])
 
 
 # ──────────────────────────────────────────────────────────────
