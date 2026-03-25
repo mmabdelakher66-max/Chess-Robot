@@ -1,32 +1,13 @@
-<!--
-  stockfish_test.launch
-  Launches chess vision node + GUI/Stockfish node.
-
-  rotate=0   : default, human at top, a8=TL h8=TR h1=BR a1=BL
-  rotate=180 : board physically rotated 180 degrees
-  mirror     : flip left-right after rotation
-
-  To run with rotate=180:
-    roslaunch chess_vision stockfish_test.launch rotate:=180
-
-  To force re-calibration:
-    roslaunch chess_vision stockfish_test.launch calibrate:=true
-
-  Calibration click order: a8 (TL) -> h8 (TR) -> h1 (BR) -> a1 (BL)
--->
-
 <launch>
+  <arg name="rotate"    default="0"/>
+  <arg name="mirror"    default="false"/>
+  <arg name="calibrate" default="false"/>
+  <arg name="cam"       default="-1"/>
+  <arg name="topic"     default="/niryo_robot_vision/compressed_video_stream"/>
+  <arg name="skill"     default="5"/>
+  <arg name="depth"     default="12"/>
+  <arg name="stockfish" default=""/>
 
-  <arg name="rotate"     default="0"/>
-  <arg name="mirror"     default="false"/>
-  <arg name="calibrate"  default="false"/>
-  <arg name="cam"        default="-1"/>
-  <arg name="topic"      default="/niryo_robot_vision/compressed_video_stream"/>
-  <arg name="skill"      default="5"/>
-  <arg name="depth"      default="12"/>
-  <arg name="stockfish"  default=""/>
-
-  <!-- Vision node -->
   <node name="chess_vision_node"
         pkg="chess_vision"
         type="chess_piece_vision_node.py"
@@ -39,7 +20,6 @@
     <param name="topic"     type="str"  value="$(arg topic)"/>
   </node>
 
-  <!-- GUI + Stockfish node -->
   <node name="chess_gui_stockfish_node"
         pkg="chess_vision"
         type="chess_gui_stockfish_node.py"
@@ -49,5 +29,4 @@
     <param name="depth"     type="int" value="$(arg depth)"/>
     <param name="stockfish" type="str" value="$(arg stockfish)"/>
   </node>
-
 </launch>
