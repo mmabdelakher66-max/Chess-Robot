@@ -3,10 +3,10 @@
 """
 chess_piece_vision_node.py
 ROS Melodic / Python 2.7
-Niryo Ned 1 — overhead camera chess vision
+Niryo Ned 1 - overhead camera chess vision
 
 Approach: homography warp + L2-norm square comparison (repo approach)
-- 4 corner clicks → cv2.getPerspectiveTransform → 400x400 flat board
+- 4 corner clicks -> cv2.getPerspectiveTransform -> 400x400 flat board
 - find_moves(): L2 norm per 50x50 square, dynamic threshold
 - Turn-based before_w: captured ONCE per turn (not per motion event)
   so putting a piece back to its spot = zero delta
@@ -17,7 +17,7 @@ Topics published
 /chess_vision/cleanup_event (std_msgs/String) "cleanup:e5" after capture removal
 """
 
-from __future__ import print_function
+from __future__ import print_function, division
 import sys
 import os
 import cv2
@@ -36,7 +36,7 @@ try:
     _CHESS_AVAILABLE = True
 except ImportError:
     _CHESS_AVAILABLE = False
-    rospy.logwarn_once("python-chess not found — board tracking disabled")
+    rospy.logwarn_once("python-chess not found - board tracking disabled")
 
 # ──────────────────────────────────────────────────────────────
 # Paths
@@ -148,7 +148,7 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
     """
     CORNER_NAMES = ['a8', 'h8', 'h1', 'a1']
     # Destination corners in 400x400 warped image
-    # a8→TL, h8→TR, h1→BR, a1→BL
+    # a8->TL, h8->TR, h1->BR, a1->BL
     DST_PTS = np.array([
         [0,         0        ],
         [BOARD_PIX, 0        ],
@@ -170,8 +170,8 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
             rospy.loginfo("Click %d: (%d,%d) => %s",
                           len(clicks), x, y, CORNER_NAMES[len(clicks) - 1])
 
-    # Flush camera buffer — first frames are often black on USB cameras
-    rospy.loginfo("Warming up camera…")
+    # Flush camera buffer - first frames are often black on USB cameras
+    rospy.loginfo("Warming up camera...")
     for _ in range(60):
         cap.read()
     time.sleep(0.3)
@@ -184,7 +184,7 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
             break
         time.sleep(0.05)
     if frame is None:
-        rospy.logerr("Camera returns black frames — check cable/index")
+        rospy.logerr("Camera returns black frames - check cable/index")
         return None
 
     cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
@@ -278,13 +278,13 @@ def calibrate_homography(cap, rotate_deg, mirror, hom_path):
         if key in (ord('r'), ord('R')):
             clicks[:] = []
             H = None
-            rospy.loginfo("Retry — click a8 h8 h1 a1")
+            rospy.loginfo("Retry - click a8 h8 h1 a1")
         elif key in (ord('s'), ord('S')):
             if len(clicks) == 4:
                 src = np.array(clicks, dtype=np.float32)
                 H = cv2.getPerspectiveTransform(src, DST_PTS)
                 save_homography(hom_path, H)
-                # Do NOT destroy window — run() reuses the same DISPLAY_WIN
+                # Do NOT destroy window - run() reuses the same DISPLAY_WIN
                 cv2.setMouseCallback(DISPLAY_WIN, lambda *a: None)
                 return H
             else:
@@ -356,7 +356,7 @@ class MoveDetector(object):
         self.grace_start  = 0.0
 
         # Turn-based reference: set once per turn (not per motion event).
-        # This means pick-up-and-put-back = zero delta → no phantom move.
+        # This means pick-up-and-put-back = zero delta -> no phantom move.
         self.before_w     = None
         self._before_w_ready = False
 
@@ -385,7 +385,7 @@ class MoveDetector(object):
         with self._lock:
             self._expecting_engine   = True
             self._pending_engine_uci = uci
-            rospy.loginfo("[vision] Expecting engine move %s — waiting for arm", uci)
+            rospy.loginfo("[vision] Expecting engine move %s - waiting for arm", uci)
 
     def on_move_rejected(self):
         with self._lock:
@@ -394,7 +394,7 @@ class MoveDetector(object):
                 self.before_w = warp_board(self.last_frame, self.H)
             self.state        = STATE_IDLE
             self.stable_count = 0
-        rospy.logwarn("[vision] Move rejected — before_w reset")
+        rospy.logwarn("[vision] Move rejected - before_w reset")
 
     def on_game_reset(self):
         with self._lock:
@@ -408,7 +408,7 @@ class MoveDetector(object):
             self.stable_count = 0
             self._expecting_engine   = False
             self._pending_engine_uci = None
-        rospy.loginfo("[vision] Game reset — board and before_w reset")
+        rospy.loginfo("[vision] Game reset - board and before_w reset")
 
     def set_initial_baseline(self, frame):
         """Call once on startup with a stable frame."""
@@ -483,17 +483,17 @@ class MoveDetector(object):
             if motion:
                 self.state        = STATE_MOTION
                 self.stable_count = 0
-                rospy.logdebug("[vision] IDLE→MOTION mean_d=%.1f", mean_d)
+                rospy.logdebug("[vision] IDLE->MOTION mean_d=%.1f", mean_d)
 
         elif self.state == STATE_MOTION:
             if not motion:
                 self.state        = STATE_SETTLING
                 self.stable_count = 1
-                rospy.logdebug("[vision] MOTION→SETTLING")
+                rospy.logdebug("[vision] MOTION->SETTLING")
 
         elif self.state == STATE_SETTLING:
             if motion:
-                # Hand moved again — reset settling
+                # Hand moved again - reset settling
                 self.state        = STATE_MOTION
                 self.stable_count = 0
                 return
@@ -519,7 +519,7 @@ class MoveDetector(object):
     def _on_settled(self, frame):
         """Board has settled after motion. Compare before_w vs current."""
         if self.before_w is None:
-            rospy.logwarn("[vision] No before_w — skipping")
+            rospy.logwarn("[vision] No before_w - skipping")
             return
 
         after_w = warp_board(frame, self.H)
@@ -530,18 +530,18 @@ class MoveDetector(object):
                       [round(m, 1) for m in magnitudes])
 
         if self._expecting_engine:
-            # Robot arm just finished — update before_w for player's turn
+            # Robot arm just finished - update before_w for player's turn
             if self._pending_engine_uci:
                 self._try_push(self._pending_engine_uci)
             self.before_w            = after_w
             self._expecting_engine   = False
             self._pending_engine_uci = None
-            rospy.loginfo("[vision] Engine move settled — before_w updated for player's turn")
+            rospy.loginfo("[vision] Engine move settled - before_w updated for player's turn")
             return
 
-        # No candidates or top change too small → treat as noise
+        # No candidates or top change too small -> treat as noise
         if not candidates or (magnitudes and magnitudes[0] < 50.0):
-            rospy.logdebug("[vision] Change too small (%.1f) — ignoring",
+            rospy.logdebug("[vision] Change too small (%.1f) - ignoring",
                            magnitudes[0] if magnitudes else 0.0)
             return
 
@@ -550,7 +550,7 @@ class MoveDetector(object):
             rospy.loginfo("[vision] Human move detected: %s", uci)
             self._try_push(uci)
             self.move_pub.publish(uci)
-            # Before_w is NOT updated here — updated in grace/_after_grace
+            # Before_w is NOT updated here - updated in grace/_after_grace
             # so that cleanup (captured piece removal) can be detected
             self.grace_start  = time.time()
             self.state        = STATE_GRACE
@@ -568,7 +568,7 @@ class MoveDetector(object):
         candidates, magnitudes = find_moves(self.before_w, after_w)
 
         if not candidates:
-            # Nothing changed since last before_w — just end grace
+            # Nothing changed since last before_w - just end grace
             self.before_w     = after_w
             self.state        = STATE_IDLE
             self.stable_count = 0
@@ -656,7 +656,7 @@ class ChessVisionNode(object):
                 rospy.logwarn("Failed to load homography: %s", e)
 
         if H is None:
-            rospy.loginfo("Starting calibration…")
+            rospy.loginfo("Starting calibration...")
             H = calibrate_homography(self.cap, self.rotate, self.mirror,
                                      HOMOGRAPHY_PATH)
             if H is None:
@@ -666,7 +666,7 @@ class ChessVisionNode(object):
         self.detector = MoveDetector(H, self.move_pub, self.cleanup_pub)
 
         # Capture initial stable frame for before_w
-        rospy.loginfo("Capturing initial baseline — keep board still…")
+        rospy.loginfo("Capturing initial baseline - keep board still...")
         for _ in range(60):
             ret, frame = self.cap.read()
             if ret and frame is not None:
@@ -688,7 +688,7 @@ class ChessVisionNode(object):
         rospy.Subscriber('/chess_vision/engine_move',   String,
                          self._on_engine_move)
 
-        # Camera topic (optional — for ROS image transport)
+        # Camera topic (optional - for ROS image transport)
         if args.ros_camera:
             rospy.Subscriber(args.ros_camera, CompressedImage,
                              self._on_ros_image)
@@ -737,10 +737,10 @@ class ChessVisionNode(object):
             except Exception as e:
                 rospy.logwarn_throttle(5, "Capture error: %s", e)
 
-    # ── main loop — display only, stays on main thread ───────
+    # ── main loop - display only, stays on main thread ───────
 
     def run(self):
-        # Window already created in __init__ — just start the capture thread.
+        # Window already created in __init__ - just start the capture thread.
         if not self._use_ros_camera:
             t = threading.Thread(target=self._capture_loop)
             t.daemon = True
