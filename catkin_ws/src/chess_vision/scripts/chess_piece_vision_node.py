@@ -36,7 +36,7 @@ try:
     _CHESS_AVAILABLE = True
 except ImportError:
     _CHESS_AVAILABLE = False
-    rospy.logwarn_once("python-chess not found - board tracking disabled")
+    rospy.logwarn("python-chess not found - board tracking disabled")
 
 # ──────────────────────────────────────────────────────────────
 # Paths
@@ -666,21 +666,24 @@ class ChessVisionNode(object):
         self.detector = MoveDetector(H, self.move_pub, self.cleanup_pub)
 
         # Capture initial stable frame for before_w.
-        # Call waitKey every frame so GTK keeps painting the window.
+        # waitKey(1) every iteration keeps GTK painting the window.
         rospy.loginfo("Capturing initial baseline - keep board still...")
         last_frame = None
         for _ in range(60):
             ret, raw = self.cap.read()
             if ret and raw is not None:
                 last_frame = apply_transform(raw, self.rotate, self.mirror)
-                cv2.putText(last_frame.copy(), "Setting baseline - keep still...",
+                overlay = last_frame.copy()
+                cv2.putText(overlay, "Setting baseline - keep still...",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.imshow(DISPLAY_WIN, last_frame)
+                cv2.imshow(DISPLAY_WIN, overlay)
             cv2.waitKey(1)
         if last_frame is not None:
             self.detector.set_initial_baseline(last_frame)
 
-        self._latest_frame = None
+        # Seed _latest_frame with the baseline frame so run() shows
+        # something immediately instead of waiting for the capture thread.
+        self._latest_frame = last_frame
         self._frame_lock   = threading.Lock()
 
         # GUI feedback subscriptions
