@@ -39,6 +39,14 @@ import rospy
 from std_msgs.msg import String
 from sensor_msgs.msg import CompressedImage
 
+# python-chess for board-state tracking (installed via pip2 install python-chess==0.23.11)
+try:
+    import chess as _chess_mod
+    _CHESS_AVAILABLE = True
+except ImportError:
+    _CHESS_AVAILABLE = False
+    rospy.logwarn_once("python-chess not found — board tracking disabled")
+
 # ──────────────────────────────────────────────────────────────
 # Constants / tunables
 # ──────────────────────────────────────────────────────────────
@@ -519,7 +527,19 @@ class MoveDetector(object):
 
         # Set True when engine_move published; vision waits for
         # physical board change then re-baselines WITHOUT publishing.
-        self._expecting_engine  = False
+        self._expecting_engine    = False
+        self._pending_engine_uci  = None   # the actual engine UCI to push to board
+
+        # Internal chess board — tracks confirmed moves so we can validate
+        # detected squares against legal_moves before publishing.
+        # h2→e2 is immediately rejected as illegal (h2 is empty), so the
+        # system searches deeper in the ranked squares to find the real move.
+        if _CHESS_AVAILABLE:
+            self._board          = _chess_mod.Board()
+            self._board_tracking = True
+        else:
+            self._board          = None
+            self._board_tracking = False
 
         self._baseline_ready = False
         self._lock           = threading.Lock()
@@ -534,9 +554,7 @@ class MoveDetector(object):
     def reset_after_rejection(self):
         """
         Called when GUI rejected our published move as illegal.
-        The physical board has already changed, but we published
-        wrong square names.  Re-capture baseline from the CURRENT
-        frame so we stop seeing that change as 'new'.
+        Undo the optimistic board push and re-baseline.
         """
         with self._lock:
             if self.last_frame is not None:
@@ -545,7 +563,79 @@ class MoveDetector(object):
             self.stable_count = 0
             self.idle_count   = 0
             self.vote_frames  = []
+            self._try_pop()   # undo the optimistic board push
         rospy.logwarn("Baseline reset after rejected move — board re-learned")
+
+    # ── board tracking helpers ───────────────────────────────
+
+    def _try_push(self, uci):
+        """Push move to tracking board; disable tracking on desync."""
+        if not self._board_tracking:
+            return
+        try:
+            self._board.push(_chess_mod.Move.from_uci(uci))
+        except Exception as e:
+            rospy.logwarn("Board tracking desync on push(%s): %s — disabling", uci, e)
+            self._board_tracking = False
+
+    def _try_pop(self):
+        """Pop last move from tracking board."""
+        if not self._board_tracking:
+            return
+        try:
+            self._board.pop()
+        except Exception:
+            pass
+
+    def reset_board(self):
+        """Reset internal board to start position (New Game)."""
+        if _CHESS_AVAILABLE:
+            self._board          = _chess_mod.Board()
+            self._board_tracking = True
+        rospy.loginfo("Internal board reset to start position")
+
+    def _find_legal_move(self, ranked, n):
+        """
+        Search the top-16 ranked squares for any pair that forms a legal
+        move on the current internal board.
+
+        This eliminates h2→e2 (h2 is empty), g1→f1 (not a knight move),
+        etc. and finds the REAL move even if noisy squares dominate top-2.
+
+        Returns UCI string or None.
+        """
+        if not self._board_tracking:
+            return None
+        try:
+            legal = frozenset(self._board.legal_moves)
+        except Exception:
+            return None
+        if not legal:
+            rospy.loginfo("No legal moves available (game over?)")
+            return None
+
+        top = [(sq, acc / n) for sq, acc in ranked[:16]]
+        rospy.loginfo("Board-search top squares: %s",
+                      ', '.join('%s(%.0f)' % (sq, d) for sq, d in top[:8]))
+
+        for src, d_src in top:
+            for dst, d_dst in top:
+                if src == dst:
+                    continue
+                for suffix in ('', 'q', 'r', 'b', 'n'):
+                    try:
+                        m = _chess_mod.Move.from_uci(src + dst + suffix)
+                        if m in legal:
+                            uci = src + dst + suffix
+                            rospy.loginfo(
+                                "Legal move found: %s  (src_delta=%.1f dst_delta=%.1f)",
+                                uci, d_src, d_dst)
+                            return uci
+                    except Exception:
+                        pass
+
+        rospy.logwarn("No legal move in top-16 squares — ignoring trigger")
+        return None
 
     def force_baseline(self, frame):
         """Manually set baseline (called after calibration or 'B' key)."""
@@ -635,14 +725,19 @@ class MoveDetector(object):
             if self._expecting_engine:
                 # This is the engine's physical move being placed on the board.
                 # Do NOT publish it as a human move — just re-baseline.
-                rospy.loginfo("Engine move physically executed (%s) — re-baselining", move)
+                rospy.loginfo("Engine move physically executed — re-baselining")
                 self._expecting_engine = False
+                # Push the ENGINE's actual UCI (not the detected squares) to board
+                if self._pending_engine_uci:
+                    self._try_push(self._pending_engine_uci)
+                    self._pending_engine_uci = None
                 self.baseline.update(frame)
                 self.state = STATE_IDLE
                 self.idle_count = 0
             else:
                 rospy.loginfo("Move detected: %s", move)
                 self.move_pub.publish(move)
+                self._try_push(move)   # optimistic board update
                 # Start grace window for capture cleanup
                 self.state = STATE_GRACE
                 self.grace_start = time.time()
@@ -719,51 +814,40 @@ class MoveDetector(object):
         n = max(len(self.vote_frames), 1)
         ranked = sorted(delta_acc.items(), key=lambda x: -x[1])
 
-        # Always log top-6 so user can verify coordinate mapping
+        # Always log top-6 for debugging
         rospy.loginfo("=== VOTE RESULT — top changed squares ===")
         for sq, acc in ranked[:6]:
             avg = acc / n
             marker = " <<< CHANGED" if avg > OCC_THRESHOLD else ""
             rospy.loginfo("  %s : avg_delta=%.1f%s", sq, avg, marker)
 
-        above = [(sq, acc / n) for sq, acc in ranked if acc / n > OCC_THRESHOLD]
+        # ── Primary path: board-aware legal-move search ──────────────────
+        # Searches top-16 ranked squares for ANY pair forming a legal move.
+        # This filters h2→e2 (h2 is empty), g1→f1 (illegal knight move),
+        # etc. and finds the real move even if noisy squares dominate top-2.
+        legal_uci = self._find_legal_move(ranked, n)
+        if legal_uci is not None:
+            return legal_uci
 
+        # ── Fallback: no board tracking — require 2 above threshold ──────
+        above = [(sq, acc / n) for sq, acc in ranked if acc / n > OCC_THRESHOLD]
         if len(above) < 2:
-            rospy.loginfo("Only %d square(s) above threshold %.1f — ignoring (false trigger)",
+            rospy.loginfo("Only %d square(s) above threshold %.1f — ignoring",
                           len(above), OCC_THRESHOLD)
             return None
 
         sq1, d1 = above[0]
         sq2, d2 = above[1]
-
-        # Determine src vs dst using signed brightness change:
-        #   Source square: piece was removed → square now looks more like bare board
-        #   Destination  : piece was added   → square brightness changed toward piece color
-        #
-        # Heuristic: the src is the square whose current mean is CLOSER to neighboring
-        # empty squares.  Simpler proxy: the square that got BRIGHTER is more likely to
-        # be the source of a dark piece, or the square that got DARKER is source of a
-        # light piece.  Because we don't know piece color, we use the square where
-        # |signed change| is larger — that's the square that changed MORE = source.
         last = self.vote_frames[-1]
         cur1 = patch_mean(last, self.sqdict[sq1])
         cur2 = patch_mean(last, self.sqdict[sq2])
         b1   = ref_means.get(sq1, cur1)
         b2   = ref_means.get(sq2, cur2)
-
-        chg1 = abs(cur1 - b1)
-        chg2 = abs(cur2 - b2)
-
-        if chg1 >= chg2:
+        if abs(cur1 - b1) >= abs(cur2 - b2):
             src, dst = sq1, sq2
         else:
             src, dst = sq2, sq1
-
-        rospy.loginfo("  sq1=%s cur=%.1f ref=%.1f |chg|=%.1f", sq1, cur1, b1, chg1)
-        rospy.loginfo("  sq2=%s cur=%.1f ref=%.1f |chg|=%.1f", sq2, cur2, b2, chg2)
-
-        rospy.loginfo("Best move candidate: %s -> %s  (delta %.1f -> %.1f)",
-                      src, dst, d1, d2)
+        rospy.loginfo("Fallback candidate: %s -> %s", src, dst)
         return src + dst
 
     def _pub_state(self, frame, motion, delta):
@@ -993,8 +1077,8 @@ def main():
         detector.reset_after_rejection()
 
     def _on_game_reset(msg):
-        """New Game pressed — reset state machine and re-baseline."""
-        rospy.loginfo("Game reset received — re-baselining")
+        """New Game pressed — reset state machine, re-baseline, and reset board."""
+        rospy.loginfo("Game reset received — re-baselining + board reset")
         with detector._lock:
             if detector.last_frame is not None:
                 detector.baseline.update(detector.last_frame)
@@ -1002,13 +1086,17 @@ def main():
             detector.stable_count = 0
             detector.idle_count   = 0
             detector.vote_frames  = []
-            detector._baseline_ready = True
+            detector._baseline_ready     = True
+            detector._expecting_engine   = False
+            detector._pending_engine_uci = None
+        detector.reset_board()  # reset chess.Board to start position
 
     def _on_engine_move(msg):
         """Engine played — wait for user to physically make that move, then re-baseline."""
         rospy.loginfo("Engine move: %s — waiting for physical execution on board", msg.data)
         with detector._lock:
-            detector._expecting_engine = True
+            detector._expecting_engine   = True
+            detector._pending_engine_uci = msg.data   # store actual UCI for board push
             # Reset to IDLE so we can detect the physical motion
             detector.state        = STATE_IDLE
             detector.stable_count = 0
