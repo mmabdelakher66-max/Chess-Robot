@@ -632,8 +632,6 @@ class ChessVisionNode(object):
         self.mirror    = args.mirror
         self.cam_index = args.camera
 
-        rospy.init_node('chess_piece_vision_node', anonymous=False)
-
         self.move_pub    = rospy.Publisher('/chess_vision/human_move',
                                            String, queue_size=5)
         self.cleanup_pub = rospy.Publisher('/chess_vision/cleanup_event',
@@ -741,18 +739,18 @@ class ChessVisionNode(object):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Chess piece vision node")
-    p.add_argument('--camera',     type=int,   default=0,
-                   help='OpenCV camera index (default 0)')
-    p.add_argument('--rotate',     type=int,   default=0,
-                   choices=[0, 90, 180, 270],
-                   help='Rotate camera image before processing')
+    p.add_argument('--camera',     type=int,   default=-1,
+                   help='OpenCV camera index (default: from ROS param cam, else 0)')
+    p.add_argument('--rotate',     type=int,   default=-1,
+                   choices=[-1, 0, 90, 180, 270],
+                   help='Rotate camera image (default: from ROS param rotate, else 0)')
     p.add_argument('--mirror',     action='store_true',
                    help='Mirror camera image left-right')
     p.add_argument('--calibrate',  action='store_true',
                    help='Force recalibration even if homography exists')
     p.add_argument('--ros-camera', type=str,   default='',
                    dest='ros_camera',
-                   help='ROS CompressedImage topic (e.g. /niryo_robot_vision/compressed)')
+                   help='ROS CompressedImage topic override')
     # consume ROS remapping args
     args, _ = p.parse_known_args()
     return args
@@ -760,6 +758,22 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # ROS params (set by launch file) override argparse defaults
+    # Init node first so get_param works
+    rospy.init_node('chess_piece_vision_node', anonymous=False)
+
+    if args.camera < 0:
+        args.camera = int(rospy.get_param('~cam', 0))
+    if args.rotate < 0:
+        args.rotate = int(rospy.get_param('~rotate', 0))
+    if not args.mirror:
+        args.mirror = bool(rospy.get_param('~mirror', False))
+    if not args.calibrate:
+        args.calibrate = bool(rospy.get_param('~calibrate', False))
+    if not args.ros_camera:
+        args.ros_camera = str(rospy.get_param('~topic', ''))
+
     node = ChessVisionNode(args)
     node.run()
 
