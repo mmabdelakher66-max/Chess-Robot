@@ -665,17 +665,20 @@ class ChessVisionNode(object):
 
         self.detector = MoveDetector(H, self.move_pub, self.cleanup_pub)
 
-        # Capture initial stable frame for before_w
+        # Capture initial stable frame for before_w.
+        # Call waitKey every frame so GTK keeps painting the window.
         rospy.loginfo("Capturing initial baseline - keep board still...")
+        last_frame = None
         for _ in range(60):
-            ret, frame = self.cap.read()
-            if ret and frame is not None:
-                frame = apply_transform(frame, self.rotate, self.mirror)
-                time.sleep(0.05)
-        ret, frame = self.cap.read()
-        if ret and frame is not None:
-            frame = apply_transform(frame, self.rotate, self.mirror)
-            self.detector.set_initial_baseline(frame)
+            ret, raw = self.cap.read()
+            if ret and raw is not None:
+                last_frame = apply_transform(raw, self.rotate, self.mirror)
+                cv2.putText(last_frame.copy(), "Setting baseline - keep still...",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.imshow(DISPLAY_WIN, last_frame)
+            cv2.waitKey(1)
+        if last_frame is not None:
+            self.detector.set_initial_baseline(last_frame)
 
         self._latest_frame = None
         self._frame_lock   = threading.Lock()
