@@ -96,6 +96,18 @@ OCC_THRESHOLD       = 12.0
 #
 LIGHTING_DRIFT_MAX  = 6.0
 #
+# STRONG_MOVE_THRESH (default 20)
+#   Minimum delta required for at least ONE square in a detected pair.
+#   Real piece moves: source or destination typically shows delta 25-70.
+#   Camera cable vibration / shadows: typically 8-18.
+#   Setting this to 20 means cable noise cannot trigger a detection,
+#   while real piece moves (even same-color piece on same-color square,
+#   which give ~23 delta) still pass through.
+#   Raise to 25 if you still get phantom moves from cable vibration.
+#   Lower to 15 if real moves with very similar piece/square colors are missed.
+#
+STRONG_MOVE_THRESH  = 20.0
+#
 # BASELINE_IDLE_LOCK (default 300)
 #   Frames of pure idle before auto-refreshing the baseline.
 #   At 15 fps this is 20 seconds.  Prevents slow drift but also
@@ -618,9 +630,21 @@ class MoveDetector(object):
         rospy.loginfo("Board-search top squares: %s",
                       ', '.join('%s(%.0f)' % (sq, d) for sq, d in top[:8]))
 
+        # Gate: if even the top square is too quiet, this is noise (e.g. cable vibration).
+        # Real piece moves always produce at least one square with delta > STRONG_MOVE_THRESH.
+        if not top or top[0][1] < STRONG_MOVE_THRESH:
+            rospy.loginfo("Top delta %.1f < STRONG_MOVE_THRESH %.1f — noise/cable, ignoring",
+                          top[0][1] if top else 0.0, STRONG_MOVE_THRESH)
+            return None
+
         for src, d_src in top:
             for dst, d_dst in top:
                 if src == dst:
+                    continue
+                # At least one of the pair must show a strong signal.
+                # This prevents two cable-noise squares (delta ~10-15) from
+                # accidentally matching a legal move.
+                if max(d_src, d_dst) < STRONG_MOVE_THRESH:
                     continue
                 for suffix in ('', 'q', 'r', 'b', 'n'):
                     try:
@@ -634,7 +658,7 @@ class MoveDetector(object):
                     except Exception:
                         pass
 
-        rospy.logwarn("No legal move in top-16 squares — ignoring trigger")
+        rospy.logwarn("No legal move in top-16 with strong signal — ignoring trigger")
         return None
 
     def force_baseline(self, frame):
