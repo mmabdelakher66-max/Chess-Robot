@@ -46,13 +46,13 @@ SQDICT_PATH   = os.path.expanduser("~/.chess_vision/sqdict.json")
 SVM_PATH      = os.path.expanduser("~/.chess_vision/piece_svm.yml")
 CLASSES_PATH  = os.path.expanduser("~/.chess_vision/piece_classes.json")
 
-MOTION_THRESH       = 12        # absdiff mean threshold to declare motion
-STABLE_FRAMES_NEED  = 8         # consecutive stable frames before voting
+MOTION_THRESH       = 5         # absdiff mean threshold to declare motion (lowered for overhead cam)
+STABLE_FRAMES_NEED  = 6         # consecutive stable frames before voting
 VOTE_FRAMES         = 3         # frames to vote on after stability
-OCC_THRESHOLD       = 22.0      # mean pixel delta to mark square as "changed"
+OCC_THRESHOLD       = 14.0      # mean pixel delta to mark square as "changed" (lowered)
 MIN_CHANGED_SQ      = 1         # minimum squares changed to accept a move
-LIGHTING_DRIFT_MAX  = 8.0       # board-wide mean delta cap (global lighting)
-BASELINE_IDLE_LOCK  = 40        # frames of pure idle before auto baseline refresh
+LIGHTING_DRIFT_MAX  = 5.0       # board-wide mean delta cap (global lighting)
+BASELINE_IDLE_LOCK  = 300       # frames of pure idle before auto baseline refresh (~20s at 15fps)
 GRACE_WINDOW_SEC    = 14.0      # seconds after a legal move to accept cleanup
 CAPTURE_CLEANUP_MAX = 2         # max squares that can change during grace
 
