@@ -135,32 +135,56 @@ def is_occupied(img, pts, baseline_mean, threshold=35.0):
 # Calibration
 # ──────────────────────────────────────────────────────────────
 
-CORNER_LABELS = {
-    'TL': 'a8',
-    'TR': 'h8',
-    'BR': 'h1',
-    'BL': 'a1',
+# ──────────────────────────────────────────────────────────────
+# Corner → chess-square mapping for every rotate+mirror combo
+#
+# Physical board with WHITE sitting at TOP of camera image:
+#   image-TL = h1,  image-TR = a1,  image-BR = a8,  image-BL = h8
+#
+# After apply_transform(rotate, mirror) those corners move:
+#   (TL, TR, BR, BL) chess squares for each transform:
+# ──────────────────────────────────────────────────────────────
+_CORNER_MAP = {
+    # (rotate_deg, mirror): (TL_sq, TR_sq, BR_sq, BL_sq)
+    (0,   False): ('h1', 'a1', 'a8', 'h8'),
+    (90,  False): ('h8', 'h1', 'a1', 'a8'),
+    (180, False): ('a8', 'h8', 'h1', 'a1'),
+    (270, False): ('a1', 'a8', 'h8', 'h1'),
+    (0,   True):  ('a1', 'h1', 'h8', 'a8'),
+    (90,  True):  ('h1', 'h8', 'a8', 'a1'),
+    (180, True):  ('h8', 'a8', 'a1', 'h1'),
+    (270, True):  ('a8', 'a1', 'h1', 'h8'),
 }
+
+def get_corner_names(rotate_deg, mirror):
+    """Return [TL, TR, BR, BL] chess square names for this transform."""
+    key = (rotate_deg % 360, bool(mirror))
+    return list(_CORNER_MAP.get(key, ('h1', 'a1', 'a8', 'h8')))
+
 
 def calibrate_interactive(cap, rotate_deg, mirror, sqdict_path):
     """
-    Interactive calibration:
-      Click 4 corners in order: TL(a8), TR(h8), BR(h1), BL(a1)
-      Press 'S' to save, 'R' to retry, 'Q' to quit.
-    Returns sqdict dict or None.
+    Interactive calibration.
+    The window shows the board AFTER rotation+mirror is applied.
+    Labels in each corner tell you exactly which chess square to click.
+    Click order: TOP-LEFT → TOP-RIGHT → BOTTOM-RIGHT → BOTTOM-LEFT
+    Press S to save, R to retry, Q to quit.
     """
-    rospy.loginfo("=== CALIBRATION MODE ===")
-    rospy.loginfo("Click corners in order: TOP-LEFT(a8)  TOP-RIGHT(h8)  BOTTOM-RIGHT(h1)  BOTTOM-LEFT(a1)")
+    corner_names = get_corner_names(rotate_deg, mirror)  # [TL, TR, BR, BL]
+
+    rospy.loginfo("=== CALIBRATION MODE ===  rotate=%d  mirror=%s", rotate_deg, mirror)
+    rospy.loginfo("Click board corners in order: %s(TL)  %s(TR)  %s(BR)  %s(BL)",
+                  *corner_names)
     rospy.loginfo("Press S to save, R to retry, Q to quit")
 
-    WIN = "Chess Calibration — click a8, h8, h1, a1 then press S"
+    WIN = "Calibration: click %s %s %s %s then press S" % tuple(corner_names)
     clicks = []
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and len(clicks) < 4:
             clicks.append((x, y))
-            rospy.loginfo("Click %d: (%d,%d) => %s", len(clicks),
-                          x, y, ['a8','h8','h1','a1'][len(clicks)-1])
+            rospy.loginfo("Click %d: (%d,%d) => %s",
+                          len(clicks), x, y, corner_names[len(clicks)-1])
 
     frame = None
     for _ in range(30):
@@ -178,10 +202,7 @@ def calibrate_interactive(cap, rotate_deg, mirror, sqdict_path):
     cv2.resizeWindow(WIN, 800, 800)
     cv2.setMouseCallback(WIN, on_mouse)
 
-    corner_names = ['a8', 'h8', 'h1', 'a1']
-
     while True:
-        # refresh frame
         ret, raw = cap.read()
         if ret and raw is not None:
             frame = apply_transform(raw, rotate_deg, mirror)
@@ -189,47 +210,48 @@ def calibrate_interactive(cap, rotate_deg, mirror, sqdict_path):
         disp = frame.copy()
         h, w = disp.shape[:2]
 
-        # Draw orientation labels at corners
-        labels_pos = [(10, 30), (w-80, 30), (w-80, h-10), (10, h-10)]
-        for i, (lbl, pos) in enumerate(zip(corner_names, labels_pos)):
+        # Draw chess-square labels at the 4 image corners so user knows where to click
+        # Positions: TL, TR, BR, BL
+        lbl_positions = [(8, 28), (w-70, 28), (w-70, h-8), (8, h-8)]
+        for lbl, pos in zip(corner_names, lbl_positions):
             cv2.putText(disp, lbl, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.9,
-                        (0,255,255), 2)
+                        (0, 255, 255), 2)
 
-        # Draw clicked points
+        # Draw already-clicked points
         for i, pt in enumerate(clicks):
             cv2.circle(disp, pt, 8, (0, 255, 0), -1)
             cv2.putText(disp, corner_names[i], (pt[0]+10, pt[1]-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         if len(clicks) == 4:
             pts = np.array(clicks, dtype=np.float32)
-            cv2.polylines(disp, [pts.astype(np.int32).reshape(-1,1,2)],
-                          True, (0,255,0), 2)
+            cv2.polylines(disp, [pts.astype(np.int32).reshape(-1, 1, 2)],
+                          True, (0, 255, 0), 2)
             cv2.putText(disp, "Press S to save, R to retry",
-                        (10, h-40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+                        (10, h-40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
         status = "Clicks: %d/4" % len(clicks)
         if len(clicks) < 4:
-            next_name = corner_names[len(clicks)]
-            status += "  Next: %s" % next_name
+            status += "  Next: click %s" % corner_names[len(clicks)]
         cv2.putText(disp, status, (10, h-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,0), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 0), 2)
 
         cv2.imshow(WIN, disp)
         key = cv2.waitKey(30) & 0xFF
 
-        if key == ord('r') or key == ord('R'):
+        if key in (ord('r'), ord('R')):
             clicks = []
-            rospy.loginfo("Retrying — click again: a8, h8, h1, a1")
-        elif key == ord('s') or key == ord('S'):
+            rospy.loginfo("Retry — click %s %s %s %s", *corner_names)
+        elif key in (ord('s'), ord('S')):
             if len(clicks) == 4:
-                sqdict = build_sqdict_from_corners(clicks, frame.shape)
+                sqdict = build_sqdict_from_corners(clicks, frame.shape,
+                                                   rotate_deg, mirror)
                 save_sqdict(sqdict_path, sqdict)
                 cv2.destroyWindow(WIN)
                 return sqdict
             else:
                 rospy.logwarn("Need 4 clicks first")
-        elif key == ord('q') or key == ord('Q'):
+        elif key in (ord('q'), ord('Q')):
             cv2.destroyWindow(WIN)
             return None
 
@@ -237,46 +259,55 @@ def calibrate_interactive(cap, rotate_deg, mirror, sqdict_path):
     return None
 
 
-def build_sqdict_from_corners(corners, img_shape):
+def build_sqdict_from_corners(corners, img_shape, rotate_deg=0, mirror=False):
     """
-    Given 4 corners [TL, TR, BR, BL] (a8, h8, h1, a1),
-    build 64 square polygons via perspective interpolation.
+    corners = [TL_click, TR_click, BR_click, BL_click] in the displayed image.
 
-    Board layout after rotation (human at top):
-      a8 TL -- h8 TR
-      a1 BL -- h1 BR
+    Uses the rotate+mirror-aware corner map to determine which chess square
+    (a1..h8) corresponds to each image corner, then bilinear-interpolates
+    all 64 square polygons using the 4 named chess-corner anchors.
 
-    col 0=a..7=h   row 0=rank1(bottom)..7=rank8(top)
-    In image space: row 7 (rank8) is at TOP, row 0 (rank1) is at BOTTOM.
+    The interpolation is always in chess-canonical space:
+      a8 = top-left of chess board
+      h8 = top-right
+      h1 = bottom-right
+      a1 = bottom-left
     """
-    tl = np.array(corners[0], dtype=np.float64)  # a8
-    tr = np.array(corners[1], dtype=np.float64)  # h8
-    br = np.array(corners[2], dtype=np.float64)  # h1
-    bl = np.array(corners[3], dtype=np.float64)  # a1
+    corner_names = get_corner_names(rotate_deg, mirror)  # [TL_sq, TR_sq, BR_sq, BL_sq]
+
+    # Map chess corner name → image point
+    img_pt = {}
+    for name, click in zip(corner_names, corners):
+        img_pt[name] = np.array(click, dtype=np.float64)
+
+    # Chess-canonical anchor points in IMAGE space
+    pt_a8 = img_pt['a8']   # chess top-left
+    pt_h8 = img_pt['h8']   # chess top-right
+    pt_h1 = img_pt['h1']   # chess bottom-right
+    pt_a1 = img_pt['a1']   # chess bottom-left
+
+    def interp(u, v):
+        """
+        u = file fraction (0=file-a, 1=file-h)
+        v = rank fraction (0=rank-8/top, 1=rank-1/bottom) in chess space
+        """
+        return (1-v)*((1-u)*pt_a8 + u*pt_h8) + v*((1-u)*pt_a1 + u*pt_h1)
 
     sqdict = {}
-    for row in range(8):        # row 0 = rank1 (bottom of image)
-        for col in range(8):    # col 0 = file a (left of image)
-            # image row 0 = rank8 = top, image row 7 = rank1 = bottom
-            img_row = 7 - row   # rank1 → img_row=7 (bottom), rank8 → img_row=0 (top)
-            img_col = col       # file a → img_col=0 (left)
+    for rank_idx in range(8):    # 0 = rank1, 7 = rank8
+        for file_idx in range(8):  # 0 = file-a, 7 = file-h
+            u0 = file_idx / 8.0
+            u1 = (file_idx + 1) / 8.0
+            # rank8 → v=0 (chess top), rank1 → v=1 (chess bottom)
+            v0 = (7 - rank_idx) / 8.0
+            v1 = (7 - rank_idx + 1) / 8.0
 
-            def interp(p00, p10, p01, p11, u, v):
-                """Bilinear interp. u=col/8, v=row/8 in image space."""
-                return (1-v)*((1-u)*p00 + u*p10) + v*((1-u)*p01 + u*p11)
+            ptTL = interp(u0, v0)
+            ptTR = interp(u1, v0)
+            ptBR = interp(u1, v1)
+            ptBL = interp(u0, v1)
 
-            # corners of this square
-            u0 = img_col / 8.0
-            u1 = (img_col + 1) / 8.0
-            v0 = img_row / 8.0
-            v1 = (img_row + 1) / 8.0
-
-            ptTL = interp(tl, tr, bl, br, u0, v0)
-            ptTR = interp(tl, tr, bl, br, u1, v0)
-            ptBR = interp(tl, tr, bl, br, u1, v1)
-            ptBL = interp(tl, tr, bl, br, u0, v1)
-
-            name = sq_name(col, row)
+            name = sq_name(file_idx, rank_idx)
             sqdict[name] = np.array([ptTL, ptTR, ptBR, ptBL], dtype=np.float32)
 
     return sqdict
