@@ -639,6 +639,13 @@ class ChessVisionNode(object):
         self.mirror    = args.mirror
         self.cam_index = args.camera
 
+        # Create the display window FIRST so GTK fully initialises before
+        # any other OpenCV calls.  A waitKey(1) pumps the GTK event loop
+        # once so the window handle is valid from this point on.
+        cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(DISPLAY_WIN, 900, 500)
+        cv2.waitKey(1)
+
         self.move_pub    = rospy.Publisher('/chess_vision/human_move',
                                            String, queue_size=5)
         self.cleanup_pub = rospy.Publisher('/chess_vision/cleanup_event',
@@ -744,16 +751,7 @@ class ChessVisionNode(object):
     # ── main loop — display only, stays on main thread ───────
 
     def run(self):
-        # Required on Ubuntu 18.04 GTK backend — starts the GTK event loop
-        # so imshow actually paints the window instead of leaving it black.
-        try:
-            cv2.startWindowThread()
-        except Exception:
-            pass
-
-        cv2.namedWindow(DISPLAY_WIN, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(DISPLAY_WIN, 900, 500)
-
+        # Window already created in __init__ — just start the capture thread.
         if not self._use_ros_camera:
             t = threading.Thread(target=self._capture_loop)
             t.daemon = True
