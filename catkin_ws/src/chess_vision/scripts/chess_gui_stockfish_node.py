@@ -331,6 +331,12 @@ class ChessGUI(object):
             self._set_status("CHECK!")
 
     def _new_game(self):
+        # Stop any in-flight engine calculation
+        self._game_over  = True   # blocks new engine calls immediately
+        self._processing = False
+        with self._engine_lock:
+            pass  # wait for any ongoing engine call to release the lock
+
         self.board = chess.Board()
         self.last_move    = None
         self.move_history = []
@@ -338,7 +344,7 @@ class ChessGUI(object):
         self._processing  = False
         self._update_history()
         self.draw_board()
-        self._set_status("New game started. Human=WHITE, Engine=BLACK")
+        self._set_status("New game — Human=WHITE  Engine=BLACK\nMake your first move.")
 
     def _undo(self):
         if len(self.board.move_stack) >= 2:
